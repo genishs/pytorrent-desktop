@@ -1,54 +1,56 @@
+**한국어** | [English](README.en.md)
+
 # pytorrent-desktop
 
-A Windows desktop **BitTorrent client** built on [libtorrent](https://www.libtorrent.org/) (libtorrent-rasterbar) and [PySide6](https://doc.qt.io/qtforpython/).
+[libtorrent](https://www.libtorrent.org/)(libtorrent-rasterbar)과 [PySide6](https://doc.qt.io/qtforpython/) 기반으로 만든 Windows용 데스크톱 **BitTorrent 클라이언트**입니다.
 
-> ⚠️ **Legal notice.** This software is a general-purpose BitTorrent client intended **only for downloading and sharing content you are legally permitted to distribute** (e.g. Linux ISOs, Creative Commons media, your own files). It ships with **no trackers, no torrents, and no bundled search sites**. Any optional search provider queries third-party services; you are solely responsible for how you use it and for complying with applicable law and each service's terms.
+> ⚠️ **법적 고지.** 이 소프트웨어는 범용 BitTorrent 클라이언트이며, **법적으로 배포가 허용된 콘텐츠(예: 리눅스 ISO, 크리에이티브 커먼즈 미디어, 본인 소유 파일 등)를 다운로드·공유하는 용도로만** 사용해야 합니다. 트래커, 토렌트, 번들 검색 사이트는 포함되어 있지 않습니다. 선택적으로 사용할 수 있는 검색 제공자는 제3자 서비스에 질의하며, 사용 방식과 관련 법률·각 서비스 약관 준수에 대한 책임은 전적으로 사용자 본인에게 있습니다.
 
-## Status
+## 상태
 
-🚧 Early development — building toward **v0.5.0, at which all core features work**.
-See the [roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [scope](docs/SCOPE.md).
+🚧 초기 개발 단계 — **모든 핵심 기능이 동작하는 v0.5.0**을 목표로 개발 중입니다.
+[로드맵](docs/ROADMAP.md), [변경 이력](CHANGELOG.md), [범위](docs/SCOPE.md) 문서를 참고하세요.
 
-## Features
+## 기능
 
-### Core features — all working by v0.5.0
-- Open a `.torrent` file and download it
-- Add a **magnet** link (paste) and download it
-- Torrent list with live (1s) **name / size / progress / download & upload speed / peers / state**
-- **Pause / resume** per torrent
-- **Remove** (from list only, or delete data too)
-- **Sequential single-download queue** — download one torrent at a time, then the next (powered by libtorrent's queue: `active_downloads = 1`)
-- **Session restore** on restart (resume data)
-- **Privacy**: route traffic through a user-supplied **SOCKS5 proxy** with `anonymous_mode` and a **kill switch** (no direct connections if the proxy drops)
-- **On-complete action**: quit the app or shut down the system when downloads finish (opt-in)
-- Ships as a standalone Windows **`.exe`** (PyInstaller) — no Python or env-var setup for end users
+### 핵심 기능 — v0.5.0까지 모두 동작
+- `.torrent` 파일을 열어 다운로드
+- **마그넷(magnet)** 링크 추가(붙여넣기)로 다운로드
+- 실시간(1초 주기) **이름 / 크기 / 진행률 / 다운로드·업로드 속도 / 피어 수 / 상태**를 보여주는 토렌트 목록
+- 토렌트별 **일시정지 / 재개**
+- **제거**(목록에서만 제거, 또는 데이터까지 삭제)
+- **순차 단일 다운로드 큐** — 한 번에 하나의 토렌트만 다운로드하고 끝나면 다음으로 넘어감(libtorrent의 큐 기능 `active_downloads = 1` 사용)
+- 재시작 시 **세션 복원**(resume data)
+- **프라이버시**: 사용자가 제공한 **SOCKS5 프록시**로 트래픽을 라우팅하며 `anonymous_mode`와 **킬 스위치**(프록시가 끊기면 직접 연결 차단) 지원
+- **완료 후 동작**: 다운로드가 끝나면 앱 종료 또는 시스템 종료(옵트인)
+- 독립 실행형 Windows **`.exe`**(PyInstaller)로 배포 — 최종 사용자는 Python이나 환경변수 설정 불필요
 
-### Beyond core (post-0.5.0)
-- **Search**: pluggable search-provider architecture, with a [btdig](https://btdig.com/)-style DHT/meta-search provider (user-enabled, behind the legal notice)
-- **Magnet protocol handler** — click a `magnet:` link in the browser to open it here (registered by the installer)
-- Inno Setup **installer** (Start Menu shortcut, uninstaller, protocol handler)
-- **I2P** anonymous mode
-- Time-based **scheduling**
-- Per-file selection, speed limits, system tray, seeding-ratio management
+### 핵심 기능 이후(0.5.0 이후)
+- **검색**: 플러그형 검색 제공자 구조, [btdig](https://btdig.com/) 스타일의 DHT/메타 검색 제공자(사용자가 직접 활성화, 법적 고지 하에 동작)
+- **마그넷 프로토콜 핸들러** — 브라우저에서 `magnet:` 링크를 클릭하면 이 앱으로 열림(설치 프로그램이 등록)
+- Inno Setup **설치 프로그램**(시작 메뉴 바로가기, 제거 프로그램, 프로토콜 핸들러)
+- **I2P** 익명 모드
+- 시간 기반 **예약 다운로드**
+- 파일별 선택 다운로드, 속도 제한, 시스템 트레이, 시딩 비율 관리
 
-## Privacy — how "hide my IP" actually works
+## 프라이버시 — "내 IP 숨기기"가 실제로 동작하는 방식
 
-This app cannot make you anonymous by itself. It integrates with an **anonymizing service you provide** (a SOCKS5 proxy / VPN's SOCKS5 endpoint, or later I2P) and forces all BitTorrent traffic through it (`anonymous_mode`), with a kill switch that blocks direct connections if the proxy is unavailable. Without a configured proxy, your real IP is visible to peers — as with any torrent client.
+이 앱 자체만으로는 사용자를 익명화할 수 없습니다. 대신 **사용자가 직접 제공하는 익명화 서비스**(SOCKS5 프록시 / VPN의 SOCKS5 엔드포인트, 추후 I2P)와 연동하여 모든 BitTorrent 트래픽을 그곳으로 강제 라우팅하며(`anonymous_mode`), 프록시를 사용할 수 없을 때 직접 연결을 차단하는 킬 스위치를 제공합니다. 프록시가 설정되어 있지 않으면 다른 토렌트 클라이언트와 마찬가지로 실제 IP가 피어들에게 노출됩니다.
 
-## Versioning & roadmap
+## 버전 관리 및 로드맵
 
-Pre-1.0 milestones lead to **`v0.5.0`, where every core feature works**:
-`0.1` engine → `0.2` GUI → `0.3` persistence & queue → `0.4` privacy & automation →
-**`0.5` core complete (Windows `.exe`)**. Full plan in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+1.0 이전 마일스톤은 **모든 핵심 기능이 동작하는 `v0.5.0`**을 향해 진행됩니다:
+`0.1` 엔진 → `0.2` GUI → `0.3` 영속성 & 큐 → `0.4` 프라이버시 & 자동화 →
+**`0.5` 핵심 기능 완성(Windows `.exe`)**. 전체 계획은 [`docs/ROADMAP.md`](docs/ROADMAP.md)에 있습니다.
 
-## Development history
+## 개발 이력
 
-Human-readable history is kept in [`CHANGELOG.md`](CHANGELOG.md) (Keep a Changelog
-format), one entry per release, alongside the git commit history.
+사람이 읽기 쉬운 개발 이력은 [`CHANGELOG.md`](CHANGELOG.md)에 Keep a Changelog
+형식으로, 릴리스별 항목과 함께 git 커밋 이력과 나란히 관리됩니다.
 
-## Development
+## 개발 환경
 
-Requires Python **3.11–3.13** (libtorrent has no 3.14 wheel yet). We use [uv](https://docs.astral.sh/uv/).
+Python **3.11–3.13**이 필요합니다(libtorrent가 아직 3.14용 wheel을 제공하지 않음). [uv](https://docs.astral.sh/uv/)를 사용합니다.
 
 ```bash
 uv venv --python 3.12 .venv
@@ -56,13 +58,13 @@ uv pip install -e ".[dev]"
 uv run pytorrent-desktop
 ```
 
-## Tech stack
+## 기술 스택
 
-- **Engine**: `libtorrent==2.0.13` (BSD)
+- **엔진**: `libtorrent==2.0.13` (BSD)
 - **GUI**: PySide6 (LGPL)
-- **Packaging**: PyInstaller → Windows `.exe`
-- **Architecture**: `core/` (torrent engine, GUI-independent) ↔ `ui/` (PySide6)
+- **패키징**: PyInstaller → Windows `.exe`
+- **아키텍처**: `core/`(토렌트 엔진, GUI와 무관) ↔ `ui/`(PySide6)
 
-## License
+## 라이선스
 
 [MIT](LICENSE) © genishs

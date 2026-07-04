@@ -1,61 +1,61 @@
-# Scope
+**한국어** | [English](SCOPE.en.md)
 
-Source of truth for what pytorrent-desktop is (and isn't) building. Owned by
-product-lead; refined by product-planner into detailed UX specs.
+# 범위(Scope)
 
-> **Versioning:** the core/MVP features below are scheduled across releases up to
-> **v0.5.0**, where all of them work. See [`ROADMAP.md`](ROADMAP.md).
+pytorrent-desktop이 무엇을 만들고(또 무엇을 만들지 않고) 있는지에 대한 단일 진실 공급원입니다.
+product-lead가 소유하며, product-planner가 상세 UX 스펙으로 구체화합니다.
 
-## Product principle
+> **버전 관리:** 아래 핵심/MVP 기능들은 **v0.5.0**까지 여러 릴리스에 걸쳐 배치되며,
+> 그 시점에 전부 동작합니다. [`ROADMAP.md`](ROADMAP.md)를 참고하세요.
 
-A **general-purpose, lawful** BitTorrent client for Windows. Ships with no
-trackers, torrents, or bundled search sites. Any search provider is optional,
-user-enabled, and queries third-party services at the user's own responsibility.
+## 제품 원칙
 
-## MVP (v0.1) — acceptance criteria
+Windows용 **범용, 합법적** BitTorrent 클라이언트입니다. 트래커, 토렌트, 번들 검색 사이트를
+포함하지 않고 출시됩니다. 검색 제공자는 선택 사항이며 사용자가 직접 활성화해야 하고,
+제3자 서비스에 대한 질의는 사용자 본인의 책임 하에 이루어집니다.
 
-A build is MVP-complete when all of the following pass in a real demo:
+## MVP(v0.1) — 완료 기준
 
-1. **Open `.torrent`** → save-path dialog → download starts.
-2. **Add magnet** (paste) → metadata fetched → download starts.
-3. **Live list** shows name / size / progress % / ↓ & ↑ speed / peers / state,
-   refreshing ~every second.
-4. **Pause / resume** works per torrent.
-5. **Remove** offers "from list only" vs "delete data too".
-6. **Sequential single-download queue**: with one-at-a-time enabled, only one
-   torrent downloads at a time; the next starts when it finishes.
-7. **Session restore**: after restart, in-progress torrents resume (resume data).
-8. **Privacy**: configuring a SOCKS5 proxy routes traffic through it with
-   `anonymous_mode`; kill switch prevents direct connections if the proxy drops.
-9. **On-complete action** (opt-in): quit the app or shut down the system when all
-   downloads finish.
-10. Runs from a standalone **PyInstaller `.exe`** with no Python/env-var setup.
-11. Verified by a real download of a lawful torrent (e.g. Ubuntu ISO) to 100%.
+다음 항목이 실제 데모에서 모두 통과하면 MVP 완료로 간주합니다:
 
-## Out of MVP (post-MVP backlog)
+1. **`.torrent` 열기** → 저장 경로 다이얼로그 → 다운로드 시작.
+2. **마그넷 추가**(붙여넣기) → 메타데이터 가져오기 → 다운로드 시작.
+3. **실시간 목록**에 이름 / 크기 / 진행률(%) / ↓·↑ 속도 / 피어 수 / 상태가 표시되며,
+   약 1초마다 갱신됨.
+4. 토렌트별 **일시정지 / 재개** 동작.
+5. **제거** 시 "목록에서만 제거" 또는 "데이터까지 삭제"를 선택 가능.
+6. **순차 단일 다운로드 큐**: 한 번에 하나씩 옵션이 켜져 있으면 한 번에 하나의 토렌트만
+   다운로드하며, 끝나면 다음 토렌트가 시작됨.
+7. **세션 복원**: 재시작 후 진행 중이던 토렌트가 resume data로 재개됨.
+8. **프라이버시**: SOCKS5 프록시를 설정하면 `anonymous_mode`로 트래픽이 그곳을 통해
+   라우팅되고, 프록시가 끊기면 킬 스위치가 직접 연결을 차단함.
+9. **완료 후 동작**(옵트인): 모든 다운로드가 끝나면 앱을 종료하거나 시스템을 종료함.
+10. Python/환경변수 설정 없이 독립 실행형 **PyInstaller `.exe`**로 실행됨.
+11. 합법적인 토렌트(예: Ubuntu ISO)를 100%까지 실제로 다운로드하여 검증됨.
 
-- **Search**: pluggable search-provider architecture; first provider is a
-  [btdig](https://btdig.com/)-style DHT/meta-search (query + parse results →
-  magnets). User-enabled, behind the legal notice. We do **not** build a DHT
-  crawler/indexer, and we do **not** bundle providers targeting piracy sites.
-- **Magnet protocol handler** (browser click → app) via the installer.
-- **Inno Setup installer**: shortcuts, uninstaller, protocol-handler registration.
-- **I2P** anonymous mode.
-- **Time-based scheduling** (start at a specific time).
-- Per-file selection, speed limits, system tray, seeding-ratio management,
-  categories/labels, multi-language.
+## MVP 범위 밖(MVP 이후 백로그)
 
-## Non-goals
+- **검색**: 플러그형 검색 제공자 구조; 첫 제공자는 [btdig](https://btdig.com/) 스타일의
+  DHT/메타 검색(질의 + 결과 파싱 → 마그넷). 사용자가 직접 활성화, 법적 고지 하에 동작.
+  DHT 크롤러/인덱서는 만들지 **않으며**, 불법 복제 사이트를 겨냥한 제공자는 번들하지
+  **않습니다**.
+- **마그넷 프로토콜 핸들러**(브라우저 클릭 → 앱 실행), 설치 프로그램을 통해 제공.
+- **Inno Setup 설치 프로그램**: 바로가기, 제거 프로그램, 프로토콜 핸들러 등록.
+- **I2P** 익명 모드.
+- **시간 기반 예약**(지정 시각에 시작).
+- 파일별 선택 다운로드, 속도 제한, 시스템 트레이, 시딩 비율 관리, 카테고리/라벨, 다국어 지원.
 
-- Building a VPN or an anonymity network. Privacy relies on a user-supplied
-  proxy/VPN/I2P; the app only routes through it and provides a kill switch.
-- Hosting or distributing any copyrighted content.
+## 비목표(Non-goals)
 
-## Architecture (summary)
+- VPN이나 익명 네트워크를 직접 구축하지 않습니다. 프라이버시는 사용자가 제공하는
+  프록시/VPN/I2P에 의존하며, 앱은 그곳을 경유시키고 킬 스위치를 제공할 뿐입니다.
+- 저작권이 있는 콘텐츠를 호스팅하거나 배포하지 않습니다.
 
-- `core/` — libtorrent engine facade (`TorrentEngine`), **no Qt imports**,
-  headlessly testable.
-- `ui/` — PySide6: main window, `QTableView` model/view, dialogs, settings.
-- Concurrency (MVP): libtorrent runs its own threads; the UI polls
-  `engine.snapshot()` on a 1s `QTimer`. Post-MVP: move to alert-driven updates.
-- Config & resume data under `%APPDATA%\pytorrent-desktop\`.
+## 아키텍처(요약)
+
+- `core/` — libtorrent 엔진 파사드(`TorrentEngine`), **Qt import 없음**, 헤드리스로
+  테스트 가능.
+- `ui/` — PySide6: 메인 윈도우, `QTableView` 모델/뷰, 다이얼로그, 설정.
+- 동시성(MVP): libtorrent가 자체 스레드로 동작하며, UI는 1초 `QTimer`에서
+  `engine.snapshot()`을 폴링함. MVP 이후에는 alert 기반 업데이트로 전환.
+- 설정과 resume data는 `%APPDATA%\pytorrent-desktop\` 아래에 저장.
