@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag/version
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # CHANGELOG.md sections are headed "## [X.Y.Z] - YYYY-MM-DD" (no leading
+      # "v" — see docs/DECISIONS.md D7 and CHANGELOG.md's own [0.1.0.dev0]
+      # entry). This slices out the body of the section that matches the
+      # tagged version, stopping at the next "## [" heading.
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          awk -v ver="$VERSION" '
+            BEGIN { found = 0 }
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" ver "]") > 0) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+
+          if [ ! -s release_notes.md ]; then
+            {
+              echo "_CHANGELOG.md에서 [$VERSION] 섹션을 찾지 못했습니다._"
+              echo ""
+              echo "릴리스 전에 CHANGELOG.md에 해당 버전 섹션이 있는지 확인하세요"
+              echo "(docs/PROCESS.md 참고)."
+            } > release_notes.md
+          fi
+
+          {
+            echo ""
+            echo "---"
+            echo "전체 변경 이력: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) · [CHANGELOG.en.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.en.md)"
+          } >> release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: release_notes.md
+          draft: false
+          # 0.x는 핵심 기능이 아직 v0.5.0으로 안정화되기 전이므로 프리릴리스로
+          # 표시한다 (docs/ROADMAP.md 참고). 1.0.0부터는 정식 릴리스.
+          prerelease: ${{ startsWith(steps.version.outputs.version, '0.') }}
+
+# -----------------------------------------------------------------------------
+# v0.5.0에서 연결 예정: PyInstaller Windows .exe 빌드 + 릴리스 아티팩트 업로드.
+#
+# docs/ROADMAP.md의 0.5.0 항목("독립 실행형 Windows .exe로 출시")이 구현되면
+# 아래 잡의 주석을 해제하고 빌드 스텝을 실제 엔트리포인트/스펙 파일에 맞게
+# 채운다. `pyinstaller`는 이미 pyproject.toml의 [project.optional-dependencies]
+# build extra로 선언되어 있다. 지금(0.1~0.4)은 릴리스 노트만 생성한다.
+#
+#   build-windows-exe:
+#     name: Build Windows executable (PyInstaller)
+#     needs: release
+#     runs-on: windows-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.12"
+#       - run: pip install -e ".[build]"
+#       - run: pyinstaller --name pytorrent-desktop --onefile --windowed src/pytorrent_desktop/__main__.py
+#       - name: Upload .exe to release
+#         uses: softprops/action-gh-release@v2
+#         with:
+#           tag_name: ${{ needs.release.outputs.tag }}
+#           files: dist/pytorrent-desktop.exe
+# -----------------------------------------------------------------------------

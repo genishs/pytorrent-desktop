@@ -1,42 +1,44 @@
-# UX Spec — pytorrent-desktop (MVP v0.1)
+**한국어** | [English](UX-SPEC.en.md)
 
-Owner: product-planner. Source of truth for **what** and **why**: [`SCOPE.md`](SCOPE.md).
-This document concretizes SCOPE's 11 MVP acceptance criteria into screen-level layout,
-states, copy, and interactions so design-publisher can build the visuals and developer
-can wire the logic without further interpretation.
+# UX 스펙 — pytorrent-desktop (MVP v0.1)
 
-**Legend used throughout:**
-- **MUST** — required to satisfy one of SCOPE's 11 MVP acceptance criteria. Not
-  optional; cutting it fails MVP.
-- **SHOULD** — reasonable UX completeness the planner added (e.g. tooltips, an
-  "open folder" menu item). Safe to defer post-MVP if dev-lead needs to cut scope;
-  does not block the 11 criteria.
-- **OPEN** — a decision or engine change this spec assumes, flagged back to
-  product-lead / dev-lead for confirmation before or during build.
+담당: product-planner. **무엇을·왜**에 대한 기준 문서: [`SCOPE.md`](SCOPE.md).
+이 문서는 SCOPE의 11개 MVP 수용 기준을 화면 단위의 레이아웃, 상태, 카피,
+인터랙션으로 구체화하여 design-publisher가 비주얼을 만들고 developer가 추가
+해석 없이 로직을 연결할 수 있게 한다.
 
-## 0. Data model this spec assumes
+**전체에서 사용하는 범례:**
+- **MUST** — SCOPE의 11개 MVP 수용 기준 중 하나를 충족하기 위해 반드시
+  필요함. 선택 사항이 아니며, 빠지면 MVP가 실패한다.
+- **SHOULD** — 기획자가 추가한 합리적인 UX 완성도(예: 툴팁, "폴더 열기" 메뉴
+  항목). dev-lead가 범위를 줄여야 한다면 post-MVP로 미뤄도 안전하며, 11개
+  기준을 막지 않는다.
+- **OPEN** — 이 스펙이 전제하는 결정이나 엔진 변경 사항으로, 빌드 전이나
+  빌드 중에 product-lead/dev-lead의 확인을 받도록 표시함.
 
-The UI has no state of its own — it renders `TorrentEngine.snapshot()`
-(`src/pytorrent_desktop/core/engine.py`) once per second. Current `TorrentStatus`
-fields: `info_hash, name, total_bytes, progress (0.0-1.0), download_rate,
+## 0. 이 스펙이 전제하는 데이터 모델
+
+UI는 자체 상태를 갖지 않는다 — 1초마다 `TorrentEngine.snapshot()`
+(`src/pytorrent_desktop/core/engine.py`)을 렌더링할 뿐이다. 현재 `TorrentStatus`
+필드: `info_hash, name, total_bytes, progress (0.0-1.0), download_rate,
 upload_rate, num_peers, state (str), is_paused (bool)`.
 
-**OPEN-1 (to dev-lead):** this spec's state machine (§5) needs two fields the
-current dataclass doesn't expose yet:
-- `error_message: str | None` — libtorrent's `torrent_status.error` /
-  `errc`. Without it the UI can only show "an error occurred," not why.
-- `queue_position: int` (libtorrent already exposes this on `torrent_status`) —
-  needed to distinguish "queued, waiting its turn" from "active" when the
-  sequential queue is on. Without it, a queued torrent and a stalled active
-  torrent are visually indistinguishable.
+**OPEN-1 (dev-lead 대상):** 이 스펙의 상태 머신(§5)은 현재 dataclass가 아직
+노출하지 않는 필드 두 개가 필요하다:
+- `error_message: str | None` — libtorrent의 `torrent_status.error` /
+  `errc`. 이것이 없으면 UI는 "에러가 발생했다"는 것만 보여줄 뿐 이유를 보여줄
+  수 없다.
+- `queue_position: int` (libtorrent가 이미 `torrent_status`에 노출함) — 순차
+  큐가 켜져 있을 때 "큐에서 대기 중"과 "활성"을 구분하는 데 필요하다. 이것이
+  없으면 대기 중인 토렌트와 멈춰 있는 활성 토렌트를 시각적으로 구분할 수 없다.
 
-Both are additive, non-breaking changes to `TorrentStatus`. Flagging now so
-developer can add them in the same pass as the queue/error work rather than
-retrofitting the table model later.
+둘 다 `TorrentStatus`에 대한 추가적(additive)이고 호환성을 깨지 않는 변경이다.
+나중에 테이블 모델을 다시 손보는 대신 developer가 큐/에러 작업과 같은
+패스에서 함께 추가할 수 있도록 지금 표시해 둔다.
 
-## 1. Main window
+## 1. 메인 윈도우
 
-### 1.1 Layout
+### 1.1 레이아웃
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -53,7 +55,7 @@ retrofitting the table model later.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.2 Toolbar actions
+### 1.2 툴바 동작
 
 | 버튼 | 동작 | 활성화 조건 |
 |---|---|---|

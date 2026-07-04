@@ -1,50 +1,51 @@
-# Roadmap
+**한국어** | [English](ROADMAP.en.md)
 
-**Goal: every core feature works at `v0.5.0`.** Versions before 0.5.0 are
-incremental milestones toward that; versions after add non-core capabilities on
-top of a stable core.
+# 로드맵
 
-## Versioning policy
+**목표: `v0.5.0`에서 모든 핵심 기능이 동작하는 것.** 0.5.0 이전 버전들은 그 목표를 향한
+단계적 마일스톤이며, 이후 버전들은 안정된 핵심 위에 비핵심 기능을 추가합니다.
 
-Pre-1.0 semantic-ish versioning `0.MINOR.PATCH`:
+## 버전 관리 정책
 
-- **MINOR** = a feature milestone below (0.1 → 0.5).
-- **PATCH** = fixes/polish within a milestone.
-- `1.0.0` comes after 0.5 core is stable **and** the first post-core wave
-  (search + installer) has shipped and settled.
+1.0 이전은 시맨틱 버저닝과 유사한 `0.MINOR.PATCH` 방식을 사용합니다:
 
-Every release gets an entry in [`CHANGELOG.md`](../CHANGELOG.md).
+- **MINOR** = 아래 표의 기능 마일스톤(0.1 → 0.5).
+- **PATCH** = 마일스톤 내의 수정/보완.
+- `1.0.0`은 0.5 핵심 기능이 안정화되고, 첫 번째 핵심 이후 웨이브(검색 + 설치 프로그램)가
+  출시되어 안정된 뒤에 나옵니다.
 
-## Milestones
+모든 릴리스는 [`CHANGELOG.md`](../CHANGELOG.md)에 항목으로 남습니다.
 
-| Version | Theme | Scope |
+## 마일스톤
+
+| 버전 | 주제 | 범위 |
 |---|---|---|
-| **0.1.0** | Engine foundation | `TorrentEngine` over libtorrent: add `.torrent` & magnet, pause/resume/remove, status snapshot. Verified headlessly (CLI smoke test). *(scaffold done; engine impl in progress)* |
-| **0.2.0** | GUI | PySide6 main window, torrent table with live (1s) columns, Add dialog, Remove (list-only / delete-data), pause/resume from UI |
-| **0.3.0** | Persistence & queue | Resume-data save/load → **session restore** on restart; **sequential single-download queue** (one at a time, then next) |
-| **0.4.0** | Privacy & automation | **SOCKS5 proxy + `anonymous_mode` + kill switch**; **on-complete action** (quit app / shut down system, opt-in) |
-| **🎯 0.5.0** | **Core complete** | All of the above integrated and stable, shipped as a standalone Windows **`.exe`** (PyInstaller). Verified by a full lawful download end-to-end. **This is the "all core features work" target.** |
+| **0.1.0** | 엔진 기반 | libtorrent 위에 `TorrentEngine` 구현: `.torrent` 및 마그넷 추가, 일시정지/재개/제거, 상태 스냅샷. 헤드리스로 검증(CLI 스모크 테스트). *(스캐폴드 완료; 엔진 구현 진행 중)* |
+| **0.2.0** | GUI | PySide6 메인 윈도우, 실시간(1초) 컬럼을 가진 토렌트 테이블, 추가 다이얼로그, 제거(목록만/데이터 삭제), UI에서 일시정지/재개 |
+| **0.3.0** | 영속성 & 큐 | resume data 저장/로드 → 재시작 시 **세션 복원**; **순차 단일 다운로드 큐**(하나씩 처리 후 다음으로) |
+| **0.4.0** | 프라이버시 & 자동화 | **SOCKS5 프록시 + `anonymous_mode` + 킬 스위치**; **완료 후 동작**(앱 종료/시스템 종료, 옵트인) |
+| **🎯 0.5.0** | **핵심 완성** | 위 항목 전부를 통합·안정화하여 독립 실행형 Windows **`.exe`**(PyInstaller)로 출시. 실제 합법적 다운로드 전 과정으로 검증. **"모든 핵심 기능 동작" 목표 지점.** |
 
-## Beyond core (post-0.5.0)
+## 핵심 기능 이후(0.5.0 이후)
 
-- **Search** — pluggable provider architecture; btdig-style DHT/meta-search provider (user-enabled, behind the legal notice). No DHT crawler, no bundled piracy providers.
-- **Installer** — Inno Setup: shortcuts, uninstaller, and `magnet:` protocol-handler registration (browser click → app).
-- **I2P** anonymous mode.
-- **Time-based scheduling** (start at a specific time).
-- Per-file selection, speed limits, system tray, seeding-ratio management, categories/labels, multi-language.
-- `1.0.0` — stable core + first post-core wave.
+- **검색** — 플러그형 제공자 구조; btdig 스타일 DHT/메타 검색 제공자(사용자가 직접 활성화, 법적 고지 하에 동작). DHT 크롤러는 만들지 않으며, 불법 복제 사이트를 겨냥한 제공자는 번들하지 않습니다.
+- **설치 프로그램** — Inno Setup: 바로가기, 제거 프로그램, `magnet:` 프로토콜 핸들러 등록(브라우저 클릭 → 앱 실행).
+- **I2P** 익명 모드.
+- **시간 기반 예약**(지정 시각에 시작).
+- 파일별 선택 다운로드, 속도 제한, 시스템 트레이, 시딩 비율 관리, 카테고리/라벨, 다국어 지원.
+- `1.0.0` — 안정된 핵심 + 첫 핵심 이후 웨이브.
 
-## Feature → version index
+## 기능 → 버전 대응표
 
-| Feature | Lands in |
+| 기능 | 반영 시점 |
 |---|---|
-| Open `.torrent` / add magnet | 0.1 (engine) → 0.2 (UI) |
-| Live torrent list | 0.2 |
-| Pause / resume / remove | 0.2 |
-| Sequential single-download queue | 0.3 |
-| Session restore (resume data) | 0.3 |
-| Privacy: SOCKS5 + kill switch | 0.4 |
-| On-complete: quit app / shutdown | 0.4 |
-| Windows `.exe` packaging | 0.5 |
-| Search (btdig-style) | post-0.5 |
-| Magnet protocol handler + installer | post-0.5 |
+| `.torrent` 열기 / 마그넷 추가 | 0.1(엔진) → 0.2(UI) |
+| 실시간 토렌트 목록 | 0.2 |
+| 일시정지 / 재개 / 제거 | 0.2 |
+| 순차 단일 다운로드 큐 | 0.3 |
+| 세션 복원(resume data) | 0.3 |
+| 프라이버시: SOCKS5 + 킬 스위치 | 0.4 |
+| 완료 후 동작: 앱 종료 / 시스템 종료 | 0.4 |
+| Windows `.exe` 패키징 | 0.5 |
+| 검색(btdig 스타일) | 0.5 이후 |
+| 마그넷 프로토콜 핸들러 + 설치 프로그램 | 0.5 이후 |
