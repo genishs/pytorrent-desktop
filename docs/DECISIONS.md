@@ -44,6 +44,27 @@ single data model between engine and UI.
 **Why:** Correctness for v2 and hybrid torrents; avoids collisions/missed resume.
 **Reversible:** Internal. **(PM default, AFK)**
 
+## D6 — UI tests use pytest-qt (Playwright does not apply to a Qt desktop app)
+**Decision:** Automated UI tests for the PySide6 GUI use **pytest-qt** (`QtBot`:
+simulate clicks/keys, assert on widgets & signals), run headlessly in CI via
+`QT_QPA_PLATFORM=offscreen` (plus xvfb on Linux). Playwright/Selenium automate web
+browsers and cannot drive native Qt widgets, so they do not apply unless a web UI is
+added. Windows-level end-to-end automation of the real window via **pywinauto** is a
+post-MVP option. UI tests land with the GUI (v0.2.0).
+**Why:** The app is a native Qt desktop GUI, not web; pytest-qt is the standard
+in-process, CI-friendly tool. (Owner asked for "Playwright 등" — the intent, automated
+UI testing, is honored with the correct tool.)
+**Reversible:** Yes. **(PM default, AFK — flag:** if you specifically want Playwright,
+that implies a web-UI pivot, i.e. a direction change I did **not** make for you.)
+
+## D7 — Docs language: Korean primary, English as multilingual secondary
+**Decision:** Documents and user-facing messages default to **Korean** (`X.md`); an
+English version is provided as multilingual support (`X.en.md`). Each file links to its
+counterpart at the top. New docs are authored Korean-first. Code identifiers stay
+English; commit messages are Korean-first.
+**Why:** Owner preference.
+**Reversible:** Yes. **(PM default, AFK)**
+
 ## Queued for the owner (revisit on return, non-blocking)
 - Whether the kill switch should offer an "anonymous DHT over proxy (UDP-associate)"
   advanced mode vs the safe tracker+PEX default (D1). Default ships; toggle is a
