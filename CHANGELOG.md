@@ -8,9 +8,13 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 Working toward **0.1.0 — Engine foundation**. See the [roadmap](docs/ROADMAP.md).
 
-### In progress
-- `docs/ARCHITECTURE.md` — engine API contract, concurrency & shutdown sequence, resume-data persistence, privacy/kill-switch, queue, packaging (system-architect).
-- `docs/UX-SPEC.md` — screen-by-screen UX, dialogs, states, edge cases, acceptance scenarios (product-planner).
+### Added
+- `docs/ARCHITECTURE.md` — engine API contract (finalized `TorrentStatus`), concurrency & the exact shutdown/resume-flush sequence, resume-data persistence, privacy/kill-switch settings, sequential queue, search-plugin seam, packaging. Verified against libtorrent 2.0.13.
+- `docs/UX-SPEC.md` — screen-by-screen UX, add/remove/settings dialogs, state transitions, edge cases, the 11 acceptance scenarios, ASCII wireframes.
+- `docs/DECISIONS.md` — decision log (kill-switch no-leak basis, on-complete countdown, `TorrentStatus` shape, info-hash keying).
+
+### Next
+- v0.1.0 engine implementation against the architecture (resume persistence, shutdown flush, error handling, tests) and CI.
 
 ## [0.1.0.dev0] - 2026-07-04
 
