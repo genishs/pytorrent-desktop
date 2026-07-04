@@ -6,11 +6,12 @@ A Windows desktop **BitTorrent client** built on [libtorrent](https://www.libtor
 
 ## Status
 
-🚧 Early development — MVP in progress. See [`docs/SCOPE.md`](docs/SCOPE.md) for the full scope.
+🚧 Early development — building toward **v0.5.0, at which all core features work**.
+See the [roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md), and [scope](docs/SCOPE.md).
 
 ## Features
 
-### MVP (v0.1)
+### Core features — all working by v0.5.0
 - Open a `.torrent` file and download it
 - Add a **magnet** link (paste) and download it
 - Torrent list with live (1s) **name / size / progress / download & upload speed / peers / state**
@@ -22,7 +23,7 @@ A Windows desktop **BitTorrent client** built on [libtorrent](https://www.libtor
 - **On-complete action**: quit the app or shut down the system when downloads finish (opt-in)
 - Ships as a standalone Windows **`.exe`** (PyInstaller) — no Python or env-var setup for end users
 
-### Planned (post-MVP)
+### Beyond core (post-0.5.0)
 - **Search**: pluggable search-provider architecture, with a [btdig](https://btdig.com/)-style DHT/meta-search provider (user-enabled, behind the legal notice)
 - **Magnet protocol handler** — click a `magnet:` link in the browser to open it here (registered by the installer)
 - Inno Setup **installer** (Start Menu shortcut, uninstaller, protocol handler)
@@ -33,6 +34,17 @@ A Windows desktop **BitTorrent client** built on [libtorrent](https://www.libtor
 ## Privacy — how "hide my IP" actually works
 
 This app cannot make you anonymous by itself. It integrates with an **anonymizing service you provide** (a SOCKS5 proxy / VPN's SOCKS5 endpoint, or later I2P) and forces all BitTorrent traffic through it (`anonymous_mode`), with a kill switch that blocks direct connections if the proxy is unavailable. Without a configured proxy, your real IP is visible to peers — as with any torrent client.
+
+## Versioning & roadmap
+
+Pre-1.0 milestones lead to **`v0.5.0`, where every core feature works**:
+`0.1` engine → `0.2` GUI → `0.3` persistence & queue → `0.4` privacy & automation →
+**`0.5` core complete (Windows `.exe`)**. Full plan in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Development history
+
+Human-readable history is kept in [`CHANGELOG.md`](CHANGELOG.md) (Keep a Changelog
+format), one entry per release, alongside the git commit history.
 
 ## Development
 

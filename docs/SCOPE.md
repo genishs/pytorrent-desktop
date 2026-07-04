@@ -3,6 +3,9 @@
 Source of truth for what pytorrent-desktop is (and isn't) building. Owned by
 product-lead; refined by product-planner into detailed UX specs.
 
+> **Versioning:** the core/MVP features below are scheduled across releases up to
+> **v0.5.0**, where all of them work. See [`ROADMAP.md`](ROADMAP.md).
+
 ## Product principle
 
 A **general-purpose, lawful** BitTorrent client for Windows. Ships with no
