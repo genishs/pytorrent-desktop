@@ -8,13 +8,22 @@ themselves (that's :class:`MainWindow`'s job).
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPushButton
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLabel, QPushButton
 
-from pytorrent_desktop.core.config import AppSettings, OnCompleteSettings, ProxySettings
+from pytorrent_desktop.core.config import (
+    AppSettings,
+    OnCompleteSettings,
+    ProxySettings,
+    SearchSettings,
+)
+from pytorrent_desktop.core.errors import SearchError
+from pytorrent_desktop.core.search.base import SearchProvider, SearchResult
 from pytorrent_desktop.ui.dialogs import (
     AddTorrentDialog,
     OnCompleteCountdownDialog,
     RemoveDialog,
+    SearchConsentDialog,
+    SearchDialog,
     SettingsDialog,
     is_valid_magnet,
 )
@@ -283,3 +292,336 @@ def test_countdown_dialog_message_mentions_action_description(qtbot):
     qtbot.addWidget(dialog)
     assert "앱을 종료" in dialog._message_label.text()
     assert "30" in dialog._message_label.text()
+
+
+# -- SettingsDialog search tab (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------
+
+
+def test_settings_dialog_prefills_search_fields(qtbot, tmp_path):
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(
+            enabled=True, btdig_base_url="https://btdig.example", consent_accepted=True
+        ),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    assert dialog.search_enabled() is True
+    assert dialog.search_btdig_base_url() == "https://btdig.example"
+    assert dialog.search_consent_accepted() is True
+
+
+def test_settings_dialog_search_disabled_by_default_and_base_url_field_disabled(qtbot, tmp_path):
+    settings = AppSettings(default_save_path=str(tmp_path))
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    assert dialog.search_enabled() is False
+    assert not dialog.search_base_url_edit.isEnabled()
+
+
+def test_settings_dialog_prefill_never_triggers_consent_gate(qtbot, tmp_path, monkeypatch):
+    """Pre-filling the checkbox from already-persisted settings must never
+    itself pop the modal consent gate — only a live user toggle should."""
+    gate_calls: list = []
+    monkeypatch.setattr(
+        SettingsDialog, "_run_search_consent_gate", lambda self: gate_calls.append(1) or True
+    )
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=True, consent_accepted=False),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    assert gate_calls == []
+    assert dialog.search_consent_accepted() is False
+
+
+def test_settings_dialog_toggling_search_on_without_consent_shows_gate(
+    qtbot, tmp_path, monkeypatch
+):
+    gate_calls: list = []
+    monkeypatch.setattr(
+        SettingsDialog, "_run_search_consent_gate", lambda self: gate_calls.append(1) or True
+    )
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=False),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    dialog.search_enabled_checkbox.setChecked(True)
+
+    assert gate_calls == [1]
+    assert dialog.search_enabled() is True
+    assert dialog.search_consent_accepted() is True
+
+
+def test_settings_dialog_declining_consent_gate_reverts_checkbox(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(SettingsDialog, "_run_search_consent_gate", lambda self: False)
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=False),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    dialog.search_enabled_checkbox.setChecked(True)
+
+    assert dialog.search_enabled() is False  # reverted
+    assert dialog.search_consent_accepted() is False
+
+
+def test_settings_dialog_does_not_reprompt_once_consent_already_accepted(
+    qtbot, tmp_path, monkeypatch
+):
+    gate_calls: list = []
+    monkeypatch.setattr(
+        SettingsDialog, "_run_search_consent_gate", lambda self: gate_calls.append(1) or True
+    )
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=True),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    dialog.search_enabled_checkbox.setChecked(True)
+
+    assert gate_calls == []  # already accepted -> no gate shown
+    assert dialog.search_enabled() is True
+
+
+def test_settings_dialog_save_blocked_for_empty_base_url_when_search_enabled(qtbot, tmp_path):
+    # consent already accepted so toggling search on does not pop the (modal,
+    # blocking) consent gate — this test only exercises base-URL validation.
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=True),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.search_enabled_checkbox.setChecked(True)
+    dialog.search_base_url_edit.setText("")
+
+    assert dialog._validate() is False
+    assert dialog.search_error_label.isVisible()
+
+
+def test_settings_dialog_save_blocked_for_non_http_base_url(qtbot, tmp_path):
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=True),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.search_enabled_checkbox.setChecked(True)
+    dialog.search_base_url_edit.setText("ftp://btdig.example")
+
+    assert dialog._validate() is False
+    assert dialog.search_error_label.isVisible()
+
+
+# -- SearchConsentDialog (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------------
+
+
+def test_consent_dialog_agree_button_disabled_until_checkbox_checked(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    assert not dialog._agree_button.isEnabled()
+
+    dialog.consent_checkbox.setChecked(True)
+    assert dialog._agree_button.isEnabled()
+
+    dialog.consent_checkbox.setChecked(False)
+    assert not dialog._agree_button.isEnabled()
+
+
+def test_consent_dialog_accepts_only_after_checkbox_and_agree_click(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    dialog.consent_checkbox.setChecked(True)
+
+    dialog.accept()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_consent_dialog_cancel_rejects(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    dialog.reject()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+
+
+def test_consent_dialog_mentions_legal_responsibility(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    # Must state: (1) may be legally problematic, (2) may violate content
+    # license, (3) user bears all responsibility.
+    notice_text = "\n".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "법적으로 문제" in notice_text
+    assert "라이선스를 위반" in notice_text
+    assert "책임은 사용자 본인에게 있습니다" in notice_text
+
+
+def test_consent_dialog_checkbox_text_states_user_responsibility(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    assert "책임" in dialog.consent_checkbox.text()
+
+
+# -- SearchDialog (v0.5.1a, EXPERIMENTAL/ALPHA) -------------------------------
+
+
+class _StubProvider(SearchProvider):
+    name = "stub"
+
+    def __init__(self, results=None, error: Exception | None = None) -> None:
+        self._results = results or []
+        self._error = error
+        self.queries: list[str] = []
+
+    def search(self, query: str, *, timeout: float = 10.0) -> list[SearchResult]:
+        self.queries.append(query)
+        if self._error is not None:
+            raise self._error
+        return list(self._results)
+
+
+def _make_result(**overrides) -> SearchResult:
+    defaults = dict(
+        title="example.iso",
+        size_bytes=1024,
+        seeders=5,
+        leechers=1,
+        magnet="magnet:?xt=urn:btih:" + "f" * 40,
+        source="stub",
+    )
+    defaults.update(overrides)
+    return SearchResult(**defaults)
+
+
+def test_search_dialog_shows_legal_notice_unconditionally(qtbot):
+    dialog = SearchDialog(_StubProvider())
+    qtbot.addWidget(dialog)
+    # Present regardless of whether consent has already been granted
+    # elsewhere — this banner is unconditional every time the dialog opens.
+    banner_labels = [
+        label for label in dialog.findChildren(QLabel) if label.property("role") == "banner-warning"
+    ]
+    assert len(banner_labels) == 1
+    assert "법적으로 문제" in banner_labels[0].text()
+    assert "책임" in banner_labels[0].text()
+
+
+def test_search_dialog_empty_query_does_not_call_provider(qtbot):
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("   ")
+    dialog._run_search()
+
+    assert provider.queries == []
+    assert dialog.results_table.rowCount() == 0
+
+
+def test_search_dialog_populates_results_table(qtbot):
+    provider = _StubProvider([_make_result(title="Ubuntu ISO"), _make_result(title="Debian ISO")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("linux")
+    dialog._run_search()
+
+    assert provider.queries == ["linux"]
+    assert dialog.results_table.rowCount() == 2
+    assert dialog.results_table.item(0, 0).text() == "Ubuntu ISO"
+    assert dialog.results_table.item(0, 2).text() == "5"  # seeders
+    assert dialog.results_table.item(0, 3).text() == "stub"  # source
+
+
+def test_search_dialog_shows_dash_for_unknown_optional_fields(qtbot):
+    provider = _StubProvider([_make_result(size_bytes=None, seeders=None, leechers=None)])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert dialog.results_table.item(0, 1).text() == "-"  # size
+    assert dialog.results_table.item(0, 2).text() == "-"  # seeders
+
+
+def test_search_dialog_no_results_shows_status_message(qtbot):
+    dialog = SearchDialog(_StubProvider([]))
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.query_edit.setText("nonexistent")
+    dialog._run_search()
+
+    assert dialog.status_label.isVisible()
+    assert dialog.results_table.rowCount() == 0
+
+
+def test_search_dialog_provider_error_shown_inline_not_raised(qtbot):
+    dialog = SearchDialog(_StubProvider(error=SearchError("boom")))
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()  # must not raise
+
+    assert dialog.status_label.isVisible()
+    assert "오류" in dialog.status_label.text()
+
+
+def test_search_dialog_download_button_disabled_until_row_selected(qtbot):
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert not dialog._download_button.isEnabled()
+    dialog.results_table.selectRow(0)
+    assert dialog._download_button.isEnabled()
+
+
+def test_search_dialog_add_to_downloads_prompts_save_path_and_accepts(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    magnet = "magnet:?xt=urn:btih:" + "9" * 40
+    provider = _StubProvider([_make_result(magnet=magnet)])
+    dialog = SearchDialog(provider, default_save_path=str(tmp_path))
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog.results_table.selectRow(0)
+
+    dialog._add_selected_to_downloads()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.selected_magnet() == magnet
+    assert dialog.selected_save_path() == str(tmp_path)
+
+
+def test_search_dialog_add_to_downloads_cancelled_save_path_stays_open(qtbot, monkeypatch):
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog.results_table.selectRow(0)
+
+    dialog._add_selected_to_downloads()
+
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert dialog.selected_magnet() is None

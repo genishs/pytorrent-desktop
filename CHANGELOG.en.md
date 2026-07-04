@@ -8,7 +8,22 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 ## [Unreleased]
 
-post-0.5: btdig-style plugin search, magnet protocol handler, Inno Setup installer, I2P. See the [roadmap](docs/ROADMAP.en.md).
+post-0.5: magnet protocol handler, Inno Setup installer, I2P. See the [roadmap](docs/ROADMAP.en.md).
+
+## [0.5.1a] - 2026-07-05
+
+**btdig-style search (experimental/alpha, develop-only).** Off by default; works only behind an explicit legal-consent gate. *Not shipped to main — under experimentation on develop.*
+
+### Added
+- **Pluggable search** — `core/search/base.py`: `SearchProvider`/`SearchResult` + registry (Qt-free). `core/search/btdig.py`: btdig HTTP query + `BeautifulSoup` (html.parser) parsing → magnets; errors wrapped in `SearchError`.
+- **Search UI** — `SearchDialog` (query, results table, legal notice banner, add selected result), a "Search" toolbar button (when enabled).
+- **Legal-consent gate (D8)** — before search can be used, the user must acknowledge (1) legal risk, (2) possible license violation of downloaded software, (3) full personal responsibility, via a checkbox + agree. Blocked until accepted; stored in `SearchSettings.consent_accepted`.
+- **Settings** — `SearchSettings` (enabled=False default, btdig_base_url, consent_accepted=False), a Search tab in the settings dialog, config.json round-trip.
+- Adds `requests` / `beautifulsoup4`. Tests: parser (HTML fixtures), registry, consent gate, dialog (pytest-qt, mock provider — **no live network**). 181 passing.
+
+### Notes
+- **No DHT crawler/indexer is built.** btdig is just the first provider, configured via a base URL.
+- As an experimental feature it lives on develop only; promotion to main is reviewed separately.
 
 ## [0.5.0] - 2026-07-05
 

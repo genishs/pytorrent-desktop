@@ -17,6 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -28,12 +29,17 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from pytorrent_desktop.core.config import AppSettings
+from pytorrent_desktop.core.errors import SearchError
+from pytorrent_desktop.core.search.base import SearchProvider, SearchResult
+from pytorrent_desktop.ui.models import format_size
 
 # docs/UX-SPEC.md §2.3: real-time inline validation gates the Add button.
 # Matches the documented prefix; a v2/hybrid ("btmh") magnet is accepted too
@@ -265,6 +271,31 @@ _ON_COMPLETE_HINT = (
     "실행 전 취소할 수 있는 확인 창이 표시됩니다."
 )
 
+# -- search (v0.5.1a, EXPERIMENTAL/ALPHA) legal notice ------------------------
+#
+# Shown (a) unconditionally at the top of SearchDialog every time it opens,
+# and (b) inside SearchConsentDialog as the thing the user must explicitly
+# agree to before search is ever used (docs/SCOPE.md, docs/ARCHITECTURE.md
+# §9). Korean primary, English secondary — must state: (1) this feature can
+# be legally problematic, (2) downloaded software/content may violate its
+# license, (3) the user bears all responsibility.
+_SEARCH_LEGAL_NOTICE = (
+    "⚠ 실험적 기능(알파): 검색은 btdig 등 제3자 사이트에 질의를 보냅니다. "
+    "이 기능(토렌트 검색/다운로드)의 사용은 관할 법률에 따라 법적으로 문제가 될 수 있으며, "
+    "다운로드하는 소프트웨어/콘텐츠가 해당 라이선스를 위반할 수 있습니다. "
+    "검색 결과 확인 및 다운로드에 대한 모든 책임은 사용자 본인에게 있습니다.\n\n"
+    "Experimental (alpha) feature: search sends queries to third-party sites "
+    "such as btdig. Use of this torrent search/download feature may be "
+    "illegal depending on your jurisdiction, and the software/content you "
+    "download may violate its license. You are solely responsible for any "
+    "search results you act on and anything you download."
+)
+
+_SEARCH_CONSENT_CHECKBOX_TEXT = (
+    "위 내용을 읽고 이해했으며, 이에 대한 책임은 나에게 있음에 동의합니다."
+    " (I have read and understood the above, and I accept sole responsibility.)"
+)
+
 
 class SettingsDialog(QDialog):
     """Settings dialog: save path, listening port, SOCKS5 proxy + kill
@@ -298,6 +329,7 @@ class SettingsDialog(QDialog):
         general_group = self._build_general_group(settings)
         privacy_group = self._build_privacy_group(settings, initial_password)
         on_complete_group = self._build_on_complete_group(settings)
+        search_group = self._build_search_group(settings)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok, self
@@ -311,12 +343,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(general_group)
         layout.addWidget(privacy_group)
         layout.addWidget(on_complete_group)
+        layout.addWidget(search_group)
         layout.addStretch(1)
         layout.addWidget(self._buttons)
 
         self._update_proxy_fields_enabled(self.proxy_enabled_checkbox.isChecked())
         self._update_kill_switch_warning()
         self._update_on_complete_hint()
+        self._update_search_fields_enabled(self.search_enabled_checkbox.isChecked())
 
     # -- construction ------------------------------------------------------
 
@@ -417,6 +451,53 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.on_complete_hint_label)
         return group
 
+    def _build_search_group(self, settings: AppSettings) -> QGroupBox:
+        """검색 탭 (v0.5.1a, EXPERIMENTAL/ALPHA): enable toggle + btdig base URL.
+
+        Toggling the checkbox *on* while the legal-responsibility consent
+        (``SearchSettings.consent_accepted``) hasn't been granted yet pops the
+        consent gate (``SearchConsentDialog``) right here, inline — one of
+        the two trigger points the product spec calls for, the other being
+        ``MainWindow._ensure_search_consent`` guarding the search dialog
+        itself as a defense-in-depth backstop (e.g. against a hand-edited
+        ``config.json`` with ``enabled: true`` but no consent recorded).
+        Declining reverts the checkbox to unchecked.
+        """
+        search = settings.search
+        # Tracks whether consent has been granted *in this dialog session*
+        # (seeded from the persisted value, then possibly flipped true by
+        # the gate below) — read back by ``search_consent_accepted()``.
+        self._search_consent_accepted = search.consent_accepted
+
+        self.search_enabled_checkbox = QCheckBox("검색 사용 (실험적/알파)", self)
+        self.search_enabled_checkbox.setChecked(search.enabled)
+
+        self.search_base_url_edit = QLineEdit(search.btdig_base_url, self)
+        self.search_base_url_edit.textChanged.connect(self._clear_search_error)
+        self.search_error_label = QLabel(self)
+        self.search_error_label.setProperty("role", "error")
+        self.search_error_label.setVisible(False)
+
+        self.search_legal_label = QLabel(_SEARCH_LEGAL_NOTICE, self)
+        self.search_legal_label.setProperty("role", "warning")
+        self.search_legal_label.setWordWrap(True)
+
+        # Connected only now, after the initial setChecked() above, so
+        # pre-filling the checkbox from already-saved settings can never
+        # itself pop the consent-gate dialog during construction.
+        self.search_enabled_checkbox.toggled.connect(self._on_search_enabled_toggled)
+
+        form = QFormLayout()
+        form.addRow("btdig base URL:", self.search_base_url_edit)
+        form.addRow("", self.search_error_label)
+
+        group = QGroupBox("검색 (실험적/알파)", self)
+        layout = QVBoxLayout(group)
+        layout.addWidget(self.search_enabled_checkbox)
+        layout.addWidget(self.search_legal_label)
+        layout.addLayout(form)
+        return group
+
     # -- dynamic field state -------------------------------------------------
 
     def _update_proxy_fields_enabled(self, enabled: bool) -> None:
@@ -440,6 +521,34 @@ class SettingsDialog(QDialog):
     def _clear_proxy_error(self) -> None:
         self.proxy_error_label.setVisible(False)
 
+    def _update_search_fields_enabled(self, enabled: bool) -> None:
+        self.search_base_url_edit.setEnabled(enabled)
+
+    def _on_search_enabled_toggled(self, checked: bool) -> None:
+        self._update_search_fields_enabled(checked)
+        if checked and not self._search_consent_accepted:
+            if self._run_search_consent_gate():
+                self._search_consent_accepted = True
+            else:
+                # Declined: revert. This re-enters this handler with
+                # checked=False, which is a no-op past this branch.
+                self.search_enabled_checkbox.setChecked(False)
+                return
+        self._clear_search_error()
+
+    def _run_search_consent_gate(self) -> bool:
+        """Show the consent gate; return whether the user agreed.
+
+        Split out as its own method (rather than inlined) purely so tests
+        can monkeypatch it to skip the modal dialog while still exercising
+        the enable/revert wiring around it.
+        """
+        dialog = SearchConsentDialog(parent=self)
+        return dialog.exec() == SearchConsentDialog.DialogCode.Accepted
+
+    def _clear_search_error(self) -> None:
+        self.search_error_label.setVisible(False)
+
     def _browse_save_path(self) -> None:
         directory = QFileDialog.getExistingDirectory(
             self, "저장 경로 선택", self.save_path_edit.text()
@@ -458,11 +567,14 @@ class SettingsDialog(QDialog):
         self.save_path_error_label.setVisible(False)
         self.listen_port_error_label.setVisible(False)
         self.proxy_error_label.setVisible(False)
+        self.search_error_label.setVisible(False)
 
         ok = self._validate_save_path() and ok
         ok = self._validate_listen_port() and ok
         if self.proxy_enabled_checkbox.isChecked():
             ok = self._validate_proxy_fields() and ok
+        if self.search_enabled_checkbox.isChecked():
+            ok = self._validate_search_fields() and ok
         return ok
 
     def _validate_save_path(self) -> bool:
@@ -514,6 +626,18 @@ class SettingsDialog(QDialog):
             return False
         return True
 
+    def _validate_search_fields(self) -> bool:
+        base_url = self.search_base_url_edit.text().strip()
+        if not base_url:
+            self.search_error_label.setText("btdig base URL을 입력하세요")
+            self.search_error_label.setVisible(True)
+            return False
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            self.search_error_label.setText("http:// 또는 https://로 시작해야 합니다")
+            self.search_error_label.setVisible(True)
+            return False
+        return True
+
     # -- result accessors (read after exec() returns Accepted) ---------------
 
     def default_save_path(self) -> str:
@@ -546,6 +670,18 @@ class SettingsDialog(QDialog):
         if self.on_complete_shutdown_radio.isChecked():
             return "shutdown_system"
         return "none"
+
+    def search_enabled(self) -> bool:
+        return self.search_enabled_checkbox.isChecked()
+
+    def search_btdig_base_url(self) -> str:
+        return self.search_base_url_edit.text().strip()
+
+    def search_consent_accepted(self) -> bool:
+        """Whether the legal-responsibility gate has been accepted, either
+        previously (persisted) or just now via the inline consent gate this
+        dialog ran when the checkbox was toggled on (§ ``_on_search_enabled_toggled``)."""
+        return self._search_consent_accepted
 
 
 # -- On-complete countdown dialog (docs/DECISIONS.md D3, docs/UX-SPEC.md §5.6) -----
@@ -621,3 +757,228 @@ class OnCompleteCountdownDialog(QDialog):
     def _cancel(self) -> None:
         self._timer.stop()
         self.reject()
+
+
+# -- Search consent gate (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------------
+
+
+class SearchConsentDialog(QDialog):
+    """Legal-responsibility consent gate for the experimental search feature.
+
+    Must be explicitly accepted (checkbox checked *and* the "동의" button
+    clicked) before a search provider is ever queried or a search result is
+    ever added via ``TorrentEngine.add_magnet``. Two call sites enforce this:
+    ``SettingsDialog`` pops it the moment the user toggles "검색 사용" on
+    (if not already consented), and ``MainWindow._ensure_search_consent``
+    pops it again as a backstop right before the search dialog opens (in
+    case search got enabled without going through the Settings toggle, e.g.
+    a hand-edited ``config.json``). Declining (Cancel, or closing the
+    dialog) must leave search blocked — callers check ``exec()``'s result
+    and must not proceed on anything but ``Accepted``.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("검색 기능 사용 동의 (실험적/알파)")
+        self.setModal(True)
+
+        notice_label = QLabel(_SEARCH_LEGAL_NOTICE, self)
+        notice_label.setWordWrap(True)
+        notice_label.setProperty("role", "warning")
+
+        self.consent_checkbox = QCheckBox(_SEARCH_CONSENT_CHECKBOX_TEXT, self)
+        self.consent_checkbox.toggled.connect(self._update_agree_enabled)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok, self
+        )
+        self._agree_button = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._agree_button.setText("동의")
+        # Disabled until the checkbox is ticked — the button alone must not
+        # be enough to grant consent.
+        self._agree_button.setEnabled(False)
+        self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(notice_label)
+        layout.addWidget(self.consent_checkbox)
+        layout.addWidget(self._buttons)
+
+    def _update_agree_enabled(self, checked: bool) -> None:
+        self._agree_button.setEnabled(checked)
+
+
+# -- Search dialog (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------------------
+
+_SEARCH_RESULT_COLUMNS = ("제목", "크기", "시더", "출처")
+
+
+def _format_optional_size(size_bytes: int | None) -> str:
+    return format_size(size_bytes) if size_bytes is not None else "-"
+
+
+def _format_optional_count(value: int | None) -> str:
+    return str(value) if value is not None else "-"
+
+
+class SearchDialog(QDialog):
+    """EXPERIMENTAL/ALPHA search dialog (v0.5.1a, docs/ARCHITECTURE.md §9).
+
+    Queries the injected :class:`SearchProvider` **directly** — not through
+    :class:`~pytorrent_desktop.core.engine.TorrentEngine`, since search
+    providers are a separate, optional subsystem (docs/SCOPE.md) — and
+    catches :class:`~pytorrent_desktop.core.errors.SearchError` itself,
+    showing an inline status message instead of propagating it. Only the
+    final "다운로드 추가" step calls back out to :class:`MainWindow`, which
+    remains the sole caller of ``TorrentEngine.add_magnet`` (the same
+    division of responsibility every other dialog in this module follows).
+
+    The legal notice banner at the top is **unconditional**: it is shown
+    every time this dialog opens regardless of whether the one-time consent
+    gate (:class:`SearchConsentDialog`) has already been accepted — the
+    per-open banner and the one-time consent gate are deliberately separate
+    requirements.
+
+    Runs each query synchronously on the Qt main thread (blocking this modal
+    dialog, not the rest of the app, for the HTTP round-trip) — acceptable
+    for this experimental/alpha milestone; docs/ARCHITECTURE.md §9 sketches
+    a worker-thread version as the eventual non-alpha design.
+    """
+
+    def __init__(
+        self,
+        provider: SearchProvider,
+        *,
+        timeout: float = 10.0,
+        default_save_path: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"검색 (실험적/알파) — {provider.name}")
+        self.setModal(True)
+        self.resize(640, 420)
+        self._provider = provider
+        self._timeout = timeout
+        self._default_save_path = default_save_path
+        self._results: list[SearchResult] = []
+        self._selected_magnet: str | None = None
+        self._selected_save_path: str | None = None
+
+        banner = QLabel(_SEARCH_LEGAL_NOTICE, self)
+        banner.setWordWrap(True)
+        banner.setProperty("role", "banner-warning")
+
+        self.query_edit = QLineEdit(self)
+        self.query_edit.setPlaceholderText("검색어 입력…")
+        self.query_edit.returnPressed.connect(self._run_search)
+        search_button = QPushButton("검색", self)
+        search_button.setProperty("variant", "primary")
+        search_button.clicked.connect(self._run_search)
+        query_row = QHBoxLayout()
+        query_row.addWidget(self.query_edit)
+        query_row.addWidget(search_button)
+
+        self.status_label = QLabel(self)
+        self.status_label.setProperty("role", "hint")
+        self.status_label.setVisible(False)
+
+        self.results_table = QTableWidget(0, len(_SEARCH_RESULT_COLUMNS), self)
+        self.results_table.setHorizontalHeaderLabels(list(_SEARCH_RESULT_COLUMNS))
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.results_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.results_table.itemSelectionChanged.connect(self._update_download_enabled)
+
+        self._download_button = QPushButton("다운로드 추가", self)
+        self._download_button.setProperty("variant", "primary")
+        self._download_button.setEnabled(False)
+        self._download_button.clicked.connect(self._add_selected_to_downloads)
+
+        self._buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, self)
+        self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("닫기")
+        self._buttons.rejected.connect(self.reject)
+        self._buttons.addButton(self._download_button, QDialogButtonBox.ButtonRole.ActionRole)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(banner)
+        layout.addLayout(query_row)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.results_table)
+        layout.addWidget(self._buttons)
+
+    # -- search --------------------------------------------------------------
+
+    def _run_search(self) -> None:
+        query = self.query_edit.text().strip()
+        if not query:
+            return
+        self.results_table.setRowCount(0)
+        self._results = []
+        self._download_button.setEnabled(False)
+        self._set_status("검색 중…")
+        try:
+            results = self._provider.search(query, timeout=self._timeout)
+        except SearchError as exc:
+            self._set_status(f"검색 오류: {exc}")
+            return
+        self._results = results
+        if not results:
+            self._set_status("검색 결과가 없습니다")
+            return
+        self._set_status(f"{len(results)}개 결과")
+        self._populate_results(results)
+
+    def _populate_results(self, results: list[SearchResult]) -> None:
+        self.results_table.setRowCount(len(results))
+        for row, result in enumerate(results):
+            self.results_table.setItem(row, 0, QTableWidgetItem(result.title))
+            self.results_table.setItem(
+                row, 1, QTableWidgetItem(_format_optional_size(result.size_bytes))
+            )
+            self.results_table.setItem(
+                row, 2, QTableWidgetItem(_format_optional_count(result.seeders))
+            )
+            self.results_table.setItem(row, 3, QTableWidgetItem(result.source))
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+        self.status_label.setVisible(bool(text))
+
+    # -- selection / download -------------------------------------------------
+
+    def _update_download_enabled(self) -> None:
+        self._download_button.setEnabled(bool(self.results_table.selectedItems()))
+
+    def _add_selected_to_downloads(self) -> None:
+        selected_rows = {index.row() for index in self.results_table.selectedIndexes()}
+        if not selected_rows:
+            return
+        row = next(iter(selected_rows))
+        if row >= len(self._results):
+            return
+        result = self._results[row]
+
+        directory = QFileDialog.getExistingDirectory(
+            self, "저장 경로 선택", self._default_save_path
+        )
+        if not directory:
+            return  # cancelled the save-path picker; stay on the results view
+
+        self._selected_magnet = result.magnet
+        self._selected_save_path = directory
+        self.accept()
+
+    # -- result accessors (read after exec() returns Accepted) ---------------
+
+    def selected_magnet(self) -> str | None:
+        return self._selected_magnet
+
+    def selected_save_path(self) -> str | None:
+        return self._selected_save_path
+
+    def results_count(self) -> int:
+        """Test helper: how many results are currently loaded."""
+        return len(self._results)

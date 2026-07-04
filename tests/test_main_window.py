@@ -11,9 +11,10 @@ from __future__ import annotations
 from PySide6.QtWidgets import QDialog
 
 import pytorrent_desktop.ui.main_window as main_window_module
-from pytorrent_desktop.core.config import AppSettings, OnCompleteSettings
+from pytorrent_desktop.core.config import AppSettings, OnCompleteSettings, SearchSettings
 from pytorrent_desktop.core.engine import ProxyConfig, TorrentStatus
 from pytorrent_desktop.core.errors import UnknownTorrentError
+from pytorrent_desktop.core.search.base import SearchProvider
 from pytorrent_desktop.ui.main_window import MainWindow
 from pytorrent_desktop.ui.models import Column
 
@@ -31,10 +32,15 @@ class FakeEngine:
         self.configure_privacy_calls: list[ProxyConfig | None] = []
         self.listen_port_calls: list[int] = []
         self.shutdown_calls = 0
+        self.add_magnet_calls: list[tuple[str, str]] = []
         self._privacy_status = "disabled"
 
     def snapshot(self) -> list[TorrentStatus]:
         return list(self._torrents)
+
+    def add_magnet(self, magnet_uri: str, save_path: str) -> str:
+        self.add_magnet_calls.append((magnet_uri, save_path))
+        return "a" * 40
 
     def pause(self, info_hash: str) -> None:
         if info_hash not in {t.info_hash for t in self._torrents}:
@@ -286,6 +292,15 @@ class _FakeSettingsDialog:
     def on_complete_action(self) -> str:
         return "none"
 
+    def search_enabled(self) -> bool:
+        return False
+
+    def search_btdig_base_url(self) -> str:
+        return "https://btdig.com"
+
+    def search_consent_accepted(self) -> bool:
+        return False
+
 
 def test_settings_dialog_accept_applies_proxy_and_listen_port(qtbot, monkeypatch):
     engine = FakeEngine()
@@ -512,3 +527,172 @@ def test_on_complete_countdown_uses_the_configured_duration(qtbot, monkeypatch):
     window._poll()
 
     assert calls == [(30, "시스템을 종료")]  # docs/DECISIONS.md D3: 30s, never skipped
+
+
+# -- search (v0.5.1a, EXPERIMENTAL/ALPHA — docs/ARCHITECTURE.md §9) -----------
+#
+# Fake stand-ins for SearchConsentDialog/SearchDialog, same test-double
+# pattern as _FakeSettingsDialog/_make_fake_countdown_dialog above: no real
+# Qt dialog is shown, only exec()'s return value and the small accessor
+# surface MainWindow actually calls.
+
+
+class _FakeProvider(SearchProvider):
+    name = "fake-provider"
+
+    def search(self, query: str, *, timeout: float = 10.0) -> list:
+        return []
+
+
+def _make_fake_consent_dialog(calls: list, result):
+    class _FakeSearchConsentDialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, parent=None) -> None:
+            calls.append("shown")
+
+        def exec(self):
+            return result
+
+    return _FakeSearchConsentDialog
+
+
+def _make_fake_search_dialog(result, *, magnet=None, save_path=None):
+    class _FakeSearchDialog:
+        DialogCode = QDialog.DialogCode
+        constructed_with: list = []
+
+        def __init__(self, provider, *, timeout=10.0, default_save_path="", parent=None) -> None:
+            type(self).constructed_with.append((provider, timeout, default_save_path))
+
+        def exec(self):
+            return result
+
+        def selected_magnet(self):
+            return magnet
+
+        def selected_save_path(self):
+            return save_path
+
+    return _FakeSearchDialog
+
+
+def test_search_action_disabled_by_default(qtbot):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+    assert not window._search_action.isEnabled()
+
+
+def test_search_action_enabled_when_settings_search_enabled(qtbot):
+    engine = FakeEngine()
+    settings = AppSettings(search=SearchSettings(enabled=True, consent_accepted=True))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+    assert window._search_action.isEnabled()
+
+
+def test_open_search_dialog_is_a_noop_when_search_disabled(qtbot, monkeypatch):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+
+    fake_dialog = _make_fake_search_dialog(QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(main_window_module, "SearchDialog", fake_dialog)
+
+    window._open_search_dialog()
+
+    assert fake_dialog.constructed_with == []  # never even constructed
+    assert engine.add_magnet_calls == []
+
+
+def test_open_search_dialog_blocks_without_consent_when_declined(qtbot, monkeypatch):
+    engine = FakeEngine()
+    settings = AppSettings(search=SearchSettings(enabled=True, consent_accepted=False))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+
+    consent_calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "SearchConsentDialog",
+        _make_fake_consent_dialog(consent_calls, QDialog.DialogCode.Rejected),
+    )
+    fake_search_dialog = _make_fake_search_dialog(QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(main_window_module, "SearchDialog", fake_search_dialog)
+
+    window._open_search_dialog()
+
+    assert consent_calls == ["shown"]  # the gate was shown
+    assert fake_search_dialog.constructed_with == []  # but search never ran
+    assert engine.add_magnet_calls == []
+    assert window._settings.search.consent_accepted is False  # declining doesn't persist
+
+
+def test_open_search_dialog_proceeds_after_consent_accepted(qtbot, monkeypatch, tmp_path):
+    from pytorrent_desktop.core.config import AppPaths, ConfigStore
+
+    store = ConfigStore(AppPaths(tmp_path))
+    engine = FakeEngine()
+    settings = AppSettings(search=SearchSettings(enabled=True, consent_accepted=False))
+    window = MainWindow(engine, config_store=store, settings=settings)
+    qtbot.addWidget(window)
+
+    consent_calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "SearchConsentDialog",
+        _make_fake_consent_dialog(consent_calls, QDialog.DialogCode.Accepted),
+    )
+    magnet = "magnet:?xt=urn:btih:" + "d" * 40
+    fake_search_dialog = _make_fake_search_dialog(
+        QDialog.DialogCode.Accepted, magnet=magnet, save_path="D:\\SearchDownloads"
+    )
+    monkeypatch.setattr(main_window_module, "SearchDialog", fake_search_dialog)
+
+    window._open_search_dialog()
+
+    assert consent_calls == ["shown"]
+    assert len(fake_search_dialog.constructed_with) == 1
+    assert engine.add_magnet_calls == [(magnet, "D:\\SearchDownloads")]
+    # Consent persists both in memory and on disk, so it isn't asked again.
+    assert window._settings.search.consent_accepted is True
+    assert store.load().search.consent_accepted is True
+
+
+def test_open_search_dialog_skips_consent_gate_once_already_accepted(qtbot, monkeypatch):
+    engine = FakeEngine()
+    settings = AppSettings(search=SearchSettings(enabled=True, consent_accepted=True))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+
+    consent_calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "SearchConsentDialog",
+        _make_fake_consent_dialog(consent_calls, QDialog.DialogCode.Accepted),
+    )
+    magnet = "magnet:?xt=urn:btih:" + "e" * 40
+    fake_search_dialog = _make_fake_search_dialog(
+        QDialog.DialogCode.Accepted, magnet=magnet, save_path="D:\\SearchDownloads"
+    )
+    monkeypatch.setattr(main_window_module, "SearchDialog", fake_search_dialog)
+
+    window._open_search_dialog()
+
+    assert consent_calls == []  # never shown again once already accepted
+    assert engine.add_magnet_calls == [(magnet, "D:\\SearchDownloads")]
+
+
+def test_open_search_dialog_cancel_adds_nothing(qtbot, monkeypatch):
+    engine = FakeEngine()
+    settings = AppSettings(search=SearchSettings(enabled=True, consent_accepted=True))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+
+    fake_search_dialog = _make_fake_search_dialog(QDialog.DialogCode.Rejected)
+    monkeypatch.setattr(main_window_module, "SearchDialog", fake_search_dialog)
+
+    window._open_search_dialog()
+
+    assert engine.add_magnet_calls == []
