@@ -12,9 +12,10 @@ Working toward **0.1.0 — Engine foundation**. See the [roadmap](docs/ROADMAP.m
 - `docs/ARCHITECTURE.md` — engine API contract (finalized `TorrentStatus`), concurrency & the exact shutdown/resume-flush sequence, resume-data persistence, privacy/kill-switch settings, sequential queue, search-plugin seam, packaging. Verified against libtorrent 2.0.13.
 - `docs/UX-SPEC.md` — screen-by-screen UX, add/remove/settings dialogs, state transitions, edge cases, the 11 acceptance scenarios, ASCII wireframes.
 - `docs/DECISIONS.md` — decision log (kill-switch no-leak basis, on-complete countdown, `TorrentStatus` shape, info-hash keying).
+- GitHub Actions CI (`.github/workflows/ci.yml`) on Ubuntu + Windows / Python 3.12: ruff + pytest + a libtorrent/engine smoke step; minimal headless engine tests under `tests/`. Verified green locally (ruff clean, 3 tests pass, PySide6 6.9.3 imports).
 
 ### Next
-- v0.1.0 engine implementation against the architecture (resume persistence, shutdown flush, error handling, tests) and CI.
+- v0.1.0 engine implementation against the architecture (resume persistence, shutdown flush, typed error handling, sequential queue, privacy).
 
 ## [0.1.0.dev0] - 2026-07-04
 
