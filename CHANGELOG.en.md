@@ -8,7 +8,23 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 ## [Unreleased]
 
-Next milestone: **0.5.0 — Core complete & `.exe` packaging**. See the [roadmap](docs/ROADMAP.en.md).
+post-0.5: btdig-style plugin search, magnet protocol handler, Inno Setup installer, I2P. See the [roadmap](docs/ROADMAP.en.md).
+
+## [0.5.0] - 2026-07-05
+
+**Core complete & Windows `.exe` packaging.** Five of the six core features (all but search) are feature-complete — `.torrent`/magnet downloads, sequential queue, on-complete actions, privacy. End users run the `.exe` with no Python.
+
+### Added
+- **PyInstaller packaging** — `pytorrent-desktop.spec` (one-folder, windowed): bundles the libtorrent native extension, PySide6 Qt plugins, and `ui/styles.qss`. `docs/BUILD.md` (KO/EN) build docs.
+- **Release asset auto-build** — a `build-windows-exe` job in `.github/workflows/release.yml`: on a `v*` tag, windows-latest builds the `.exe`, runs a headless smoke test, and uploads the zipped folder as a GitHub Release asset.
+- **PR build guard** — `.github/workflows/build.yml`: builds the `.exe` on PR/manual trigger and uploads it as a workflow artifact (build-regression guard).
+
+### Changed
+- `pyproject`/`__init__` version `0.4.0` → `0.5.0`.
+
+### Notes
+- Local build verified: `dist/pytorrent-desktop/pytorrent-desktop.exe` produced + headless smoke (reaches the event loop) passes.
+- ⚠️ **Manual verification pending (until then "core complete" is provisional)**: a real lawful-torrent end-to-end download, and real kill-switch leak prevention (live proxy + packet capture) — neither is possible headlessly.
 
 ## [0.4.0] - 2026-07-04
 
