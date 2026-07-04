@@ -357,6 +357,124 @@ def test_set_sequential_queue_toggles_active_downloads_setting(tmp_path: Path) -
         engine.shutdown()
 
 
+# -- pause/resume vs. the auto-manager (v0.5.1 bugfix) --------------------
+#
+# Regression tests for the reported v0.5.0 bugs: (1) "add paused" not
+# sticking, and (2) downloads not starting at all. Root cause: every torrent
+# is added ``auto_managed`` (§6, for the sequential queue), and libtorrent's
+# queue auto-manager silently re-resumes any auto-managed torrent that was
+# only stopped via a bare ``handle.pause()`` — within about one auto-manage
+# tick (roughly a second), verified against libtorrent 2.0.13. The fix
+# (``TorrentEngine.pause``/``resume``) toggles the ``auto_managed`` flag
+# alongside pause/resume so a manual pause actually sticks, and
+# ``_load_resume_data`` no longer forces ``auto_managed`` back on for a
+# torrent that was persisted in that manually-paused state.
+
+
+def test_pause_stays_paused_despite_auto_manager(tmp_path: Path) -> None:
+    """A manually paused torrent must not be silently resumed by the queue
+    auto-manager — this is the direct regression for "add paused"/pause not
+    sticking (docs bug report v0.5.1f)."""
+    engine = _engine(tmp_path)
+    try:
+        save_dir = tmp_path / "save"
+        save_dir.mkdir()
+        info_hash = engine.add_magnet(VALID_MAGNET, save_dir)
+        engine.pause(info_hash)
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            snapshot = engine.snapshot()
+            assert snapshot[0].is_paused, "auto-manager resumed a manually paused torrent"
+            time.sleep(0.2)
+    finally:
+        engine.shutdown()
+
+
+def test_resume_after_pause_becomes_unpaused(tmp_path: Path) -> None:
+    """The pause/resume round trip must still work: resume() has to restore
+    auto_managed so the torrent actually rejoins the queue and runs."""
+    engine = _engine(tmp_path)
+    try:
+        save_dir = tmp_path / "save"
+        save_dir.mkdir()
+        info_hash = engine.add_magnet(VALID_MAGNET, save_dir)
+        engine.pause(info_hash)
+        engine.resume(info_hash)
+
+        deadline = time.monotonic() + 3.0
+        became_unpaused = False
+        while time.monotonic() < deadline:
+            if not engine.snapshot()[0].is_paused:
+                became_unpaused = True
+                break
+            time.sleep(0.2)
+        assert became_unpaused, "resume() did not bring the torrent back out of paused"
+    finally:
+        engine.shutdown()
+
+
+def test_manually_paused_torrent_does_not_block_others_from_starting(tmp_path: Path) -> None:
+    """Regression test for "downloads not starting": before the fix, a
+    manually-paused torrent that got silently auto-resumed anyway occupied
+    the single ``active_downloads=1`` slot, so a second, legitimately queued
+    torrent could never get promoted."""
+    engine = _engine(tmp_path)
+    try:
+        save_dir = tmp_path / "save"
+        save_dir.mkdir()
+        hashes = _add_n_magnets(engine, save_dir, 2)
+        engine.pause(hashes[0])  # user pauses the first torrent right away
+
+        deadline = time.monotonic() + 3.0
+        second_started = False
+        while time.monotonic() < deadline:
+            by_hash = {s.info_hash: s for s in engine.snapshot()}
+            assert by_hash[hashes[0]].is_paused  # stays paused throughout (root-cause check)
+            if not by_hash[hashes[1]].is_paused:
+                second_started = True
+                break
+            time.sleep(0.2)
+        assert second_started, "second torrent never got promoted out of the queue"
+    finally:
+        engine.shutdown()
+
+
+def test_manually_paused_torrent_stays_paused_after_restart(tmp_path: Path) -> None:
+    """Regression test: ``_load_resume_data`` used to force ``auto_managed``
+    back on for every restored torrent unconditionally — silently
+    re-enabling the queue auto-manager for a torrent the user had explicitly
+    paused, so it would start itself again after every app restart."""
+    data_dir = tmp_path / "appdata"
+    save_dir = tmp_path / "save"
+    save_dir.mkdir()
+
+    engine = TorrentEngine(EngineConfig(data_dir=data_dir))
+    info_hash = engine.add_magnet(VALID_MAGNET, save_dir)
+    engine.pause(info_hash)
+    # pause() dispatches to libtorrent's internal thread asynchronously; poll
+    # until the paused state is actually observable before saving/shutting
+    # down, so the resume-data snapshot reliably reflects it (avoids a race
+    # where shutdown's flush captures the pre-pause state).
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not engine.snapshot()[0].is_paused:
+        time.sleep(0.1)
+    assert engine.snapshot()[0].is_paused  # sanity check before relying on it below
+    engine.shutdown()  # flushes resume data reflecting the paused state
+
+    engine2 = TorrentEngine(EngineConfig(data_dir=data_dir))
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            snapshot = engine2.snapshot()
+            assert len(snapshot) == 1
+            assert snapshot[0].info_hash == info_hash
+            assert snapshot[0].is_paused, "restart silently re-enabled the auto-manager"
+            time.sleep(0.2)
+    finally:
+        engine2.shutdown()
+
+
 def test_key_from_hashes_matches_the_magnet_info_hash() -> None:
     params = lt.parse_magnet_uri(VALID_MAGNET)
     key = TorrentEngine._key_from_hashes(params.info_hashes)
