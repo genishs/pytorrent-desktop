@@ -97,6 +97,15 @@ class MainWindow(QMainWindow):
         self._remove_action = toolbar.addAction("🗑 삭제")
         self._remove_action.triggered.connect(self._remove_selected)
 
+        toolbar.addSeparator()
+        # docs/ARCHITECTURE.md §6: toggles active_downloads=1 (one torrent
+        # downloading at a time) vs. -1 (unlimited). Checked by default to
+        # match EngineConfig.sequential_queue's default (True).
+        self._sequential_queue_action = toolbar.addAction("순차 다운로드")
+        self._sequential_queue_action.setCheckable(True)
+        self._sequential_queue_action.setChecked(True)
+        self._sequential_queue_action.toggled.connect(self._toggle_sequential_queue)
+
     # -- polling ------------------------------------------------------------
 
     def _poll(self) -> None:
@@ -144,6 +153,14 @@ class MainWindow(QMainWindow):
         resume_action.setEnabled(self._resume_action.isEnabled())
         resume_action.triggered.connect(self._resume_selected)
         menu.addSeparator()
+        has_selection = bool(self._selected_rows())
+        move_up_action = menu.addAction("위로 이동")
+        move_up_action.setEnabled(has_selection)
+        move_up_action.triggered.connect(lambda: self._move_selected("up"))
+        move_down_action = menu.addAction("아래로 이동")
+        move_down_action.setEnabled(has_selection)
+        move_down_action.triggered.connect(lambda: self._move_selected("down"))
+        menu.addSeparator()
         remove_action = menu.addAction("삭제…")
         remove_action.setEnabled(self._remove_action.isEnabled())
         remove_action.triggered.connect(self._remove_selected)
@@ -190,6 +207,17 @@ class MainWindow(QMainWindow):
             except EngineError as exc:
                 self._show_error("재개할 수 없습니다", exc)
         self._poll()
+
+    def _move_selected(self, direction: str) -> None:
+        for status in self._selected_rows():
+            try:
+                self._engine.move_in_queue(status.info_hash, direction)
+            except EngineError as exc:
+                self._show_error("순서를 변경할 수 없습니다", exc)
+        self._poll()
+
+    def _toggle_sequential_queue(self, checked: bool) -> None:
+        self._engine.set_sequential_queue(checked)
 
     def _remove_selected(self) -> None:
         selected = self._selected_rows()

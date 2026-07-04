@@ -8,7 +8,24 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 ## [Unreleased]
 
-Next milestone: **0.3.0 — Persistence & sequential queue**. See the [roadmap](docs/ROADMAP.en.md).
+Next milestone: **0.4.0 — Privacy & automation**. See the [roadmap](docs/ROADMAP.en.md).
+
+## [0.3.0] - 2026-07-04
+
+**Persistence & sequential queue.** Session restore across restarts and one-at-a-time downloading.
+
+### Added
+- **Session restore** — `ResumeStore` (`core/resume_store.py`): saves/loads `%APPDATA%\pytorrent-desktop\resume\<key>.fastresume` with **atomic writes** (`.tmp` + `os.replace`); unparseable files are quarantined to `resume/bad/`. Loaded on startup to restore the session.
+- **`core/config.py`** — `AppPaths` (Windows `%APPDATA%`, XDG fallback elsewhere). `EngineConfig.data_dir` now defaults to the real app-data path.
+- **Shutdown resume-flush sequence** (ARCHITECTURE §4.3) — `session.pause()` → `save_resume_data` per handle → alert drain that decrements outstanding on **both** success and failure alerts (prevents the documented hang) → log at timeout. Add-time / periodic (60s, gated by `need_save_resume_data`) / on-finish (`torrent_finished_alert`) saves share the same path. `remove()` also deletes the `.fastresume` (so it can't resurrect on next startup).
+- **Sequential single-download queue** — `set_sequential_queue` (active_downloads=1 + auto_managed), `move_in_queue(up/down/top/bottom)`. UI: a "sequential download" toolbar toggle + "move up/down" context-menu actions.
+- **Tests** — ResumeStore round-trip/atomicity/quarantine, session restore, the shutdown-drain "decrements on failed alert" regression, queue ordering. 76 passing total.
+
+### Changed
+- `pyproject`/`__init__` version `0.2.0` → `0.3.0`.
+
+### Notes
+- SOCKS5 proxy/kill switch & shutdown-on-complete (v0.4) and `.exe` packaging (v0.5) are out of scope.
 
 ## [0.2.0] - 2026-07-04
 
