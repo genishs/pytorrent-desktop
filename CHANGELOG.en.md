@@ -10,6 +10,16 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 post-0.5: btdig-style plugin search, magnet protocol handler, Inno Setup installer, I2P. See the [roadmap](docs/ROADMAP.en.md).
 
+## [0.5.1f] - 2026-07-05
+
+**[Bug fix] Downloads not starting + "add paused" not working (develop-only).**
+*The `0.5.1f` label identifies a develop iteration — it is not a valid PEP440 suffix (only a/b/rc), so it is not applied to the pyproject version.*
+
+### Fixed
+- Every torrent was added `auto_managed=True` (for the sequential queue), so a manual `pause()` was silently overridden by the auto-manager within ~1 tick. This caused **(1) "add paused" not sticking, and (2) an unintentionally auto-resumed torrent occupying the single `active_downloads=1` slot, blocking others from starting.**
+- `pause()`: unset `auto_managed` before pausing → stays paused. `resume()`: restore `auto_managed` before resuming → rejoins the queue. `_load_resume_data()`: a manual pause is preserved across restarts (no forced `auto_managed`).
+- 4 regression tests added (stays paused, resume transition, a paused torrent doesn't block others, pause survives restart). Verified against real libtorrent 2.0.13 handle state. 128 passing.
+
 ## [0.5.0] - 2026-07-05
 
 **Core complete & Windows `.exe` packaging.** Five of the six core features (all but search) are feature-complete — `.torrent`/magnet downloads, sequential queue, on-complete actions, privacy. End users run the `.exe` with no Python.

@@ -315,10 +315,15 @@ class TorrentEngine:
 
         Corrupt/unparseable files are already quarantined by
         ``ResumeStore.load_all``. Every restored torrent is (re-)added
-        auto-managed regardless of the persisted flags, so it participates
-        in the sequential queue the same as a freshly-added torrent (§6); its
-        persisted ``queue_position`` and paused state are preserved by
-        libtorrent's own resume-data round trip.
+        auto-managed *unless* the persisted flags show it was manually
+        paused (see :meth:`pause` — ``paused`` set and ``auto_managed``
+        cleared), so it participates in the sequential queue the same as a
+        freshly-added torrent (§6) while a deliberate manual pause survives
+        a restart instead of being silently re-enabled by the auto-manager.
+        Verified against libtorrent 2.0.13: ``auto_managed``/``paused``
+        round-trip losslessly through ``save_resume_data`` ->
+        ``write_resume_data_buf`` -> ``read_resume_data``, so this only has
+        to inspect ``atp.flags`` here, not re-derive anything.
         """
         for atp in self._resume_store.load_all():
             if not atp.save_path:
@@ -327,7 +332,11 @@ class TorrentEngine:
                 # inside libtorrent. Fall back to a sane default rather than
                 # dropping the torrent.
                 atp.save_path = str(Path.home() / "Downloads")
-            atp.flags |= lt.torrent_flags.auto_managed
+            was_manually_paused = bool(atp.flags & lt.torrent_flags.paused) and not bool(
+                atp.flags & lt.torrent_flags.auto_managed
+            )
+            if not was_manually_paused:
+                atp.flags |= lt.torrent_flags.auto_managed
             try:
                 handle = self._session.add_torrent(atp)
             except RuntimeError as exc:  # pragma: no cover - defensive
@@ -446,10 +455,39 @@ class TorrentEngine:
     # -- control -----------------------------------------------------------
 
     def pause(self, info_hash: str) -> None:
-        self._get_handle(info_hash).pause()
+        """Manually pause a torrent so it stays stopped (bugfix, v0.5.1).
+
+        Every torrent is added ``auto_managed`` (§6) so it participates in
+        the sequential queue, but libtorrent's queue auto-manager
+        periodically re-evaluates *every* auto-managed torrent and will
+        silently resume one that was only stopped via a bare
+        ``handle.pause()`` — verified against libtorrent 2.0.13: such a
+        torrent flips back to ``paused=False`` within about one
+        auto-manage tick (roughly a second), regardless of who called
+        ``pause()`` or why. This was the root cause of both reported v0.5.0
+        symptoms: "add paused" not sticking, and — when an unwanted
+        auto-resumed torrent occupied the single ``active_downloads=1``
+        slot — *other*, legitimately-queued torrents never getting
+        promoted to start downloading at all.
+
+        The fix is to opt this handle out of auto-management *before*
+        pausing it, so the auto-manager leaves it alone until
+        :meth:`resume` explicitly opts it back in.
+        """
+        handle = self._get_handle(info_hash)
+        handle.unset_flags(lt.torrent_flags.auto_managed)
+        handle.pause()
 
     def resume(self, info_hash: str) -> None:
-        self._get_handle(info_hash).resume()
+        """Resume a torrent and restore auto-management (see :meth:`pause`).
+
+        Re-enabling ``auto_managed`` here is what lets the torrent rejoin
+        the sequential queue (§6) instead of running unconditionally
+        outside ``active_downloads`` forever.
+        """
+        handle = self._get_handle(info_hash)
+        handle.set_flags(lt.torrent_flags.auto_managed)
+        handle.resume()
 
     def remove(self, info_hash: str, *, delete_data: bool = False) -> None:
         handle = self._get_handle(info_hash)
