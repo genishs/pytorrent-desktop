@@ -17,6 +17,7 @@ env/
 
 # PyInstaller
 *.manifest
+!pytorrent-desktop.spec
 
 # App runtime data (resume data, config, downloads)
 *.fastresume
