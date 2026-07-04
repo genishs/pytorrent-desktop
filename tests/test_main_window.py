@@ -22,6 +22,8 @@ class FakeEngine:
         self.paused: list[str] = []
         self.resumed: list[str] = []
         self.removed: list[tuple[str, bool]] = []
+        self.moved: list[tuple[str, str]] = []
+        self.sequential_queue_calls: list[bool] = []
 
     def snapshot(self) -> list[TorrentStatus]:
         return list(self._torrents)
@@ -45,6 +47,14 @@ class FakeEngine:
     def remove(self, info_hash: str, *, delete_data: bool = False) -> None:
         self.removed.append((info_hash, delete_data))
         self._torrents = [t for t in self._torrents if t.info_hash != info_hash]
+
+    def move_in_queue(self, info_hash: str, direction: str) -> None:
+        if info_hash not in {t.info_hash for t in self._torrents}:
+            raise UnknownTorrentError(info_hash)
+        self.moved.append((info_hash, direction))
+
+    def set_sequential_queue(self, one_at_a_time: bool) -> None:
+        self.sequential_queue_calls.append(one_at_a_time)
 
 
 def make_status(**overrides) -> TorrentStatus:
@@ -137,3 +147,42 @@ def test_status_bar_reports_aggregate_rates_and_active_count(qtbot):
 
 def test_column_enum_matches_seven_ux_spec_columns():
     assert len(Column) == 7
+
+
+def test_move_selected_up_calls_engine_move_in_queue(qtbot):
+    engine = FakeEngine([make_status(info_hash="a" * 40)])
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+    window._table_view.selectRow(0)
+
+    window._move_selected("up")
+
+    assert engine.moved == [("a" * 40, "up")]
+
+
+def test_move_selected_down_calls_engine_move_in_queue(qtbot):
+    engine = FakeEngine([make_status(info_hash="a" * 40)])
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+    window._table_view.selectRow(0)
+
+    window._move_selected("down")
+
+    assert engine.moved == [("a" * 40, "down")]
+
+
+def test_sequential_queue_toolbar_toggle_defaults_checked(qtbot):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+    assert window._sequential_queue_action.isChecked()
+
+
+def test_toggling_sequential_queue_action_calls_engine(qtbot):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+
+    window._sequential_queue_action.setChecked(False)
+
+    assert engine.sequential_queue_calls[-1] is False
