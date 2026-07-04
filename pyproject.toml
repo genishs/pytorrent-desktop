@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pytorrent-desktop"
+version = "0.1.0.dev0"
+description = "A Windows desktop BitTorrent client built on libtorrent and PySide6"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+authors = [{ name = "genishs" }]
+keywords = ["bittorrent", "torrent", "libtorrent", "pyside6", "desktop"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: X11 Applications :: Qt",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: File Sharing",
+]
+dependencies = [
+  "libtorrent==2.0.13",
+  "PySide6>=6.7,<6.10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+]
+build = [
+  "pyinstaller>=6.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/genishs/pytorrent-desktop"
+Repository = "https://github.com/genishs/pytorrent-desktop"
+
+[project.gui-scripts]
+pytorrent-desktop = "pytorrent_desktop.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytorrent_desktop"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

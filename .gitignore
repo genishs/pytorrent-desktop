@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# PyInstaller
+*.manifest
+
+# App runtime data (resume data, config, downloads)
+*.fastresume
+/downloads/
+/.appdata/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
