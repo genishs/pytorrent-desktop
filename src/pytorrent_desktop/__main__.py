@@ -22,7 +22,8 @@ def main() -> int:
     # Import here so a missing native dependency surfaces a clear message
     # rather than failing at module import time.
     try:
-        from pytorrent_desktop.core.engine import TorrentEngine
+        from pytorrent_desktop.core.config import AppPaths, ConfigStore
+        from pytorrent_desktop.core.engine import EngineConfig, ProxyConfig, TorrentEngine
     except Exception as exc:  # pragma: no cover - diagnostic path
         raise SystemExit(f"Failed to initialize torrent engine: {exc}") from exc
 
@@ -35,8 +36,35 @@ def main() -> int:
     if _STYLES_PATH.is_file():
         app.setStyleSheet(_STYLES_PATH.read_text(encoding="utf-8"))
 
-    engine = TorrentEngine()
-    window = MainWindow(engine)
+    # Load persisted settings (docs/ARCHITECTURE.md §7) before building the
+    # engine, so the SOCKS5 proxy / listen port / sequential-queue toggle are
+    # applied from the very first session tick — no separate "apply on
+    # startup" step needed later.
+    paths = AppPaths()
+    config_store = ConfigStore(paths)
+    settings = config_store.load()
+
+    proxy_config = None
+    if settings.proxy.enabled:
+        # docs/DECISIONS.md D2: the password is never persisted, so a
+        # restored proxy config starts with an empty one — the user must
+        # re-enter it via the Settings dialog if the proxy requires auth.
+        proxy_config = ProxyConfig(
+            host=settings.proxy.host,
+            port=settings.proxy.port,
+            username=settings.proxy.username,
+            password=None,
+            kill_switch=settings.proxy.kill_switch,
+        )
+
+    engine_config = EngineConfig(
+        listen_port=settings.listen_port,
+        data_dir=paths.data_dir,
+        proxy=proxy_config,
+        sequential_queue=settings.sequential_queue,
+    )
+    engine = TorrentEngine(engine_config)
+    window = MainWindow(engine, config_store=config_store, settings=settings)
     window.show()
 
     try:

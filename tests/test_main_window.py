@@ -8,7 +8,11 @@ integration tests against a real session.
 
 from __future__ import annotations
 
-from pytorrent_desktop.core.engine import TorrentStatus
+from PySide6.QtWidgets import QDialog
+
+import pytorrent_desktop.ui.main_window as main_window_module
+from pytorrent_desktop.core.config import AppSettings, OnCompleteSettings
+from pytorrent_desktop.core.engine import ProxyConfig, TorrentStatus
 from pytorrent_desktop.core.errors import UnknownTorrentError
 from pytorrent_desktop.ui.main_window import MainWindow
 from pytorrent_desktop.ui.models import Column
@@ -24,6 +28,10 @@ class FakeEngine:
         self.removed: list[tuple[str, bool]] = []
         self.moved: list[tuple[str, str]] = []
         self.sequential_queue_calls: list[bool] = []
+        self.configure_privacy_calls: list[ProxyConfig | None] = []
+        self.listen_port_calls: list[int] = []
+        self.shutdown_calls = 0
+        self._privacy_status = "disabled"
 
     def snapshot(self) -> list[TorrentStatus]:
         return list(self._torrents)
@@ -55,6 +63,28 @@ class FakeEngine:
 
     def set_sequential_queue(self, one_at_a_time: bool) -> None:
         self.sequential_queue_calls.append(one_at_a_time)
+
+    def configure_privacy(self, cfg: ProxyConfig | None) -> None:
+        self.configure_privacy_calls.append(cfg)
+        self._privacy_status = "enabled" if cfg is not None else "disabled"
+
+    def set_listen_port(self, port: int) -> None:
+        self.listen_port_calls.append(port)
+
+    def privacy_status(self) -> str:
+        return self._privacy_status
+
+    def shutdown(self, timeout_s: float = 10.0) -> None:
+        self.shutdown_calls += 1
+
+    def set_finished(self, info_hash: str, finished: bool) -> None:
+        """Test helper: flip a torrent's ``is_finished`` in place."""
+        self._torrents = [
+            t.__class__(**{**t.__dict__, "is_finished": finished})
+            if t.info_hash == info_hash
+            else t
+            for t in self._torrents
+        ]
 
 
 def make_status(**overrides) -> TorrentStatus:
@@ -186,3 +216,299 @@ def test_toggling_sequential_queue_action_calls_engine(qtbot):
     window._sequential_queue_action.setChecked(False)
 
     assert engine.sequential_queue_calls[-1] is False
+
+
+# -- status bar proxy indicator (docs/UX-SPEC.md §1.4) ------------------------
+
+
+def test_status_bar_shows_proxy_not_configured_by_default(qtbot):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+    assert "프록시: 미설정" in window._status_bar.currentMessage()
+
+
+def test_status_bar_shows_proxy_applied_once_configured(qtbot):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+
+    engine.configure_privacy(ProxyConfig(host="127.0.0.1", port=1080))
+    window._poll()
+
+    assert "프록시: ● 적용됨" in window._status_bar.currentMessage()
+
+
+# -- settings dialog integration (docs/UX-SPEC.md §4) -------------------------
+
+
+class _FakeSettingsDialog:
+    """Test double standing in for the real ``SettingsDialog``.
+
+    Bypasses actually constructing/showing Qt widgets — MainWindow only ever
+    calls ``exec()`` and the accessor methods after Accepted, so this only
+    needs to mimic that surface.
+    """
+
+    DialogCode = QDialog.DialogCode
+
+    def __init__(self, settings, *, initial_password=None, parent=None) -> None:
+        self.settings = settings
+        self.initial_password = initial_password
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted
+
+    def proxy_enabled(self) -> bool:
+        return True
+
+    def proxy_host(self) -> str:
+        return "127.0.0.1"
+
+    def proxy_port(self) -> int:
+        return 1080
+
+    def proxy_username(self) -> str | None:
+        return None
+
+    def proxy_password(self) -> str | None:
+        return "secret"
+
+    def kill_switch(self) -> bool:
+        return True
+
+    def listen_port(self) -> int:
+        return 7000
+
+    def default_save_path(self) -> str:
+        return "D:\\NewDownloads"
+
+    def on_complete_action(self) -> str:
+        return "none"
+
+
+def test_settings_dialog_accept_applies_proxy_and_listen_port(qtbot, monkeypatch):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(main_window_module, "SettingsDialog", _FakeSettingsDialog)
+
+    window._open_settings_dialog()
+
+    assert engine.listen_port_calls == [7000]
+    assert len(engine.configure_privacy_calls) == 1
+    cfg = engine.configure_privacy_calls[0]
+    assert cfg.host == "127.0.0.1"
+    assert cfg.port == 1080
+    assert cfg.password == "secret"
+    assert window._settings.proxy.enabled is True
+    assert window._settings.listen_port == 7000
+    assert window._settings.default_save_path == "D:\\NewDownloads"
+    assert window._proxy_password == "secret"  # kept in memory only (D2)
+
+
+def test_settings_dialog_cancel_does_not_touch_engine(qtbot, monkeypatch):
+    engine = FakeEngine()
+    window = MainWindow(engine)
+    qtbot.addWidget(window)
+
+    class _RejectingSettingsDialog(_FakeSettingsDialog):
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(main_window_module, "SettingsDialog", _RejectingSettingsDialog)
+
+    window._open_settings_dialog()
+
+    assert engine.configure_privacy_calls == []
+    assert engine.listen_port_calls == []
+
+
+def test_settings_dialog_persists_via_config_store(qtbot, monkeypatch, tmp_path):
+    from pytorrent_desktop.core.config import AppPaths, ConfigStore
+
+    store = ConfigStore(AppPaths(tmp_path))
+    engine = FakeEngine()
+    window = MainWindow(engine, config_store=store)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(main_window_module, "SettingsDialog", _FakeSettingsDialog)
+
+    window._open_settings_dialog()
+
+    reloaded = store.load()
+    assert reloaded.listen_port == 7000
+    assert reloaded.proxy.enabled is True
+    assert reloaded.proxy.host == "127.0.0.1"
+    # D2: the password must never round-trip through the on-disk config.
+    assert not hasattr(reloaded.proxy, "password")
+
+
+# -- on-complete countdown (docs/DECISIONS.md D3, docs/ARCHITECTURE.md §4.4) ----
+
+
+def _make_fake_countdown_dialog(calls: list, result):
+    """Test double for OnCompleteCountdownDialog: records construction args
+    and returns a preset result immediately, with no real timer/UI — so
+    these tests run instantly instead of waiting out a real 30s countdown."""
+
+    class _FakeCountdownDialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, seconds, still_eligible, *, action_description="", parent=None):
+            calls.append((seconds, action_description))
+            self._still_eligible = still_eligible
+
+        def exec(self):
+            return result
+
+    return _FakeCountdownDialog
+
+
+def test_on_complete_none_never_starts_a_countdown(qtbot, monkeypatch):
+    status = make_status(info_hash="a" * 40, is_finished=False)
+    engine = FakeEngine([status])
+    calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "OnCompleteCountdownDialog",
+        _make_fake_countdown_dialog(calls, QDialog.DialogCode.Accepted),
+    )
+    window = MainWindow(engine)  # default settings: on_complete.action == "none"
+    qtbot.addWidget(window)
+
+    engine.set_finished("a" * 40, True)
+    window._poll()
+
+    assert calls == []
+
+
+def test_on_complete_not_triggered_for_already_finished_restored_torrent(qtbot, monkeypatch):
+    """A torrent that's already finished/seeding when the window is built
+    (e.g. restored from resume data) must not immediately arm the countdown
+    — only a real not-finished -> finished transition observed this session
+    counts (docs/ARCHITECTURE.md §4.4)."""
+    status = make_status(info_hash="a" * 40, is_finished=True, state="seeding")
+    engine = FakeEngine([status])
+    calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "OnCompleteCountdownDialog",
+        _make_fake_countdown_dialog(calls, QDialog.DialogCode.Accepted),
+    )
+    settings = AppSettings(on_complete=OnCompleteSettings(action="quit_app"))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+
+    window._poll()
+
+    assert calls == []
+
+
+def test_on_complete_triggers_after_a_real_completion_transition(qtbot, monkeypatch):
+    status = make_status(info_hash="a" * 40, is_finished=False, state="downloading")
+    engine = FakeEngine([status])
+    calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "OnCompleteCountdownDialog",
+        _make_fake_countdown_dialog(calls, QDialog.DialogCode.Accepted),
+    )
+    settings = AppSettings(on_complete=OnCompleteSettings(action="quit_app"))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+    assert calls == []  # not finished yet
+
+    engine.set_finished("a" * 40, True)
+    window._poll()
+
+    assert len(calls) == 1
+    assert engine.shutdown_calls == 1  # resume data flushed before quitting
+
+
+def test_on_complete_quit_app_never_calls_the_system_shutdown_seam(qtbot, monkeypatch):
+    status = make_status(info_hash="a" * 40, is_finished=False)
+    engine = FakeEngine([status])
+    monkeypatch.setattr(
+        main_window_module,
+        "OnCompleteCountdownDialog",
+        _make_fake_countdown_dialog([], QDialog.DialogCode.Accepted),
+    )
+    shutdown_calls: list = []
+    settings = AppSettings(on_complete=OnCompleteSettings(action="quit_app"))
+    window = MainWindow(
+        engine, settings=settings, system_shutdown_fn=lambda: shutdown_calls.append(1)
+    )
+    qtbot.addWidget(window)
+
+    engine.set_finished("a" * 40, True)
+    window._poll()
+
+    assert shutdown_calls == []  # "quit_app" must never invoke the OS shutdown seam
+    assert engine.shutdown_calls == 1
+
+
+def test_on_complete_shutdown_system_calls_only_the_injected_seam(qtbot, monkeypatch):
+    """Safety-critical: the real OS shutdown must only ever be reachable
+    through the injected seam, never invoked directly by MainWindow, and
+    this test (like all others) never lets a real shutdown happen."""
+    status = make_status(info_hash="a" * 40, is_finished=False)
+    engine = FakeEngine([status])
+    monkeypatch.setattr(
+        main_window_module,
+        "OnCompleteCountdownDialog",
+        _make_fake_countdown_dialog([], QDialog.DialogCode.Accepted),
+    )
+    shutdown_calls: list = []
+    settings = AppSettings(on_complete=OnCompleteSettings(action="shutdown_system"))
+    window = MainWindow(
+        engine, settings=settings, system_shutdown_fn=lambda: shutdown_calls.append(1)
+    )
+    qtbot.addWidget(window)
+
+    engine.set_finished("a" * 40, True)
+    window._poll()
+
+    assert shutdown_calls == [1]
+    assert engine.shutdown_calls == 1
+
+
+def test_on_complete_cancelled_does_not_retrigger_without_a_new_completion(qtbot, monkeypatch):
+    status = make_status(info_hash="a" * 40, is_finished=False)
+    engine = FakeEngine([status])
+    calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "OnCompleteCountdownDialog",
+        _make_fake_countdown_dialog(calls, QDialog.DialogCode.Rejected),
+    )
+    settings = AppSettings(on_complete=OnCompleteSettings(action="quit_app"))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+
+    engine.set_finished("a" * 40, True)
+    window._poll()
+    assert len(calls) == 1
+
+    window._poll()  # still all-finished, but the countdown was cancelled
+
+    assert len(calls) == 1  # must not retrigger without a fresh completion
+    assert engine.shutdown_calls == 0  # cancelled -> the action never ran
+
+
+def test_on_complete_countdown_uses_the_configured_duration(qtbot, monkeypatch):
+    status = make_status(info_hash="a" * 40, is_finished=False)
+    engine = FakeEngine([status])
+    calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "OnCompleteCountdownDialog",
+        _make_fake_countdown_dialog(calls, QDialog.DialogCode.Rejected),
+    )
+    settings = AppSettings(on_complete=OnCompleteSettings(action="shutdown_system"))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+
+    engine.set_finished("a" * 40, True)
+    window._poll()
+
+    assert calls == [(30, "시스템을 종료")]  # docs/DECISIONS.md D3: 30s, never skipped

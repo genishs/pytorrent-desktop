@@ -8,11 +8,13 @@ nothing in ``core/`` knows this window exists.
 
 from __future__ import annotations
 
-from pathlib import Path
+from collections.abc import Callable
+from dataclasses import replace
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHeaderView,
     QMainWindow,
     QMenu,
@@ -22,23 +24,64 @@ from PySide6.QtWidgets import (
     QToolButton,
 )
 
-from pytorrent_desktop.core.engine import TorrentEngine, TorrentStatus
+from pytorrent_desktop.core.config import (
+    AppSettings,
+    ConfigStore,
+    OnCompleteSettings,
+    ProxySettings,
+)
+from pytorrent_desktop.core.engine import ProxyConfig, TorrentEngine, TorrentStatus
 from pytorrent_desktop.core.errors import EngineError
-from pytorrent_desktop.ui.dialogs import AddTorrentDialog, RemoveDialog
+from pytorrent_desktop.core.system_actions import request_system_shutdown
+from pytorrent_desktop.ui.dialogs import (
+    AddTorrentDialog,
+    OnCompleteCountdownDialog,
+    RemoveDialog,
+    SettingsDialog,
+)
 from pytorrent_desktop.ui.models import TorrentTableModel, format_rate
 
 _POLL_INTERVAL_MS = 1000
 _ACTIVE_STATES = {"downloading", "seeding"}
-_DEFAULT_SAVE_DIR_NAME = "pytorrent-desktop"
+# docs/DECISIONS.md D3: 30s, cancellable, never skipped.
+_ON_COMPLETE_COUNTDOWN_S = 30
 
 
 class MainWindow(QMainWindow):
     """Main window: toolbar + live torrent table + status bar (§1.1)."""
 
-    def __init__(self, engine: TorrentEngine, parent=None) -> None:
+    def __init__(
+        self,
+        engine: TorrentEngine,
+        *,
+        config_store: ConfigStore | None = None,
+        settings: AppSettings | None = None,
+        system_shutdown_fn: Callable[[], None] = request_system_shutdown,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._engine = engine
-        self._default_save_path = str(Path.home() / "Downloads" / _DEFAULT_SAVE_DIR_NAME)
+        # ``config_store`` is optional so existing (and future) tests can
+        # construct a MainWindow against a bare fake engine without wiring up
+        # a real config.json — settings simply aren't persisted in that case.
+        self._config_store = config_store
+        self._settings = settings or AppSettings()
+        self._system_shutdown_fn = system_shutdown_fn
+        self._default_save_path = self._settings.default_save_path
+        # SOCKS5 password (docs/DECISIONS.md D2): kept here, in memory, for
+        # the lifetime of this window only — never written to config.json,
+        # never read back from it. Re-prefills the Settings dialog if
+        # reopened within the same run; blank again after a restart.
+        self._proxy_password: str | None = None
+
+        # docs/ARCHITECTURE.md §4.4 / docs/DECISIONS.md D3: tracks whether at
+        # least one torrent has transitioned into "finished" *this session*
+        # (as opposed to already being finished when restored from resume
+        # data) and whether the countdown dialog is currently up, so the
+        # main poll timer's own tick doesn't re-enter it.
+        self._finished_seen: dict[str, bool] = {}
+        self._any_completed_this_session = False
+        self._countdown_active = False
 
         self.setWindowTitle("pytorrent-desktop")
         self.resize(900, 500)
@@ -99,12 +142,17 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
         # docs/ARCHITECTURE.md §6: toggles active_downloads=1 (one torrent
-        # downloading at a time) vs. -1 (unlimited). Checked by default to
-        # match EngineConfig.sequential_queue's default (True).
+        # downloading at a time) vs. -1 (unlimited). Checked state follows
+        # the loaded settings (defaults to True, matching
+        # EngineConfig.sequential_queue's default).
         self._sequential_queue_action = toolbar.addAction("순차 다운로드")
         self._sequential_queue_action.setCheckable(True)
-        self._sequential_queue_action.setChecked(True)
+        self._sequential_queue_action.setChecked(self._settings.sequential_queue)
         self._sequential_queue_action.toggled.connect(self._toggle_sequential_queue)
+
+        toolbar.addSeparator()
+        settings_action = toolbar.addAction("⚙ 설정")
+        settings_action.triggered.connect(self._open_settings_dialog)
 
     # -- polling ------------------------------------------------------------
 
@@ -113,6 +161,8 @@ class MainWindow(QMainWindow):
         self._model.set_torrents(snapshot)
         self._update_status_bar(snapshot)
         self._update_actions_enabled()
+        self._track_completions(snapshot)
+        self._maybe_start_on_complete_countdown(snapshot)
 
     def _update_status_bar(self, snapshot: list[TorrentStatus]) -> None:
         total_down = sum(t.download_rate for t in snapshot)
@@ -123,7 +173,24 @@ class MainWindow(QMainWindow):
         total = len(snapshot)
         self._status_bar.showMessage(
             f"전체: ↓ {format_rate(total_down)}  ↑ {format_rate(total_up)}   "
-            f"활성 {active}/{total}"
+            f"활성 {active}/{total}   {self._proxy_status_text()}"
+        )
+
+    def _proxy_status_text(self) -> str:
+        """docs/UX-SPEC.md §1.4's status-bar proxy indicator.
+
+        This engine call (``privacy_status()``) only reports whether a
+        proxy is currently *configured/applied*, not whether it's actually
+        reachable — distinguishing "applied" from "applied but the
+        connection failed" needs live network monitoring, which is out of
+        this milestone's scope (see ``TorrentEngine.privacy_status``'s
+        docstring for why that's also not something a headless test could
+        verify anyway).
+        """
+        return (
+            "프록시: ● 적용됨"
+            if self._engine.privacy_status() == "enabled"
+            else "프록시: 미설정"
         )
 
     # -- selection helpers ----------------------------------------------------
@@ -218,6 +285,142 @@ class MainWindow(QMainWindow):
 
     def _toggle_sequential_queue(self, checked: bool) -> None:
         self._engine.set_sequential_queue(checked)
+        self._settings = replace(self._settings, sequential_queue=checked)
+        self._save_settings()
+
+    def _save_settings(self) -> None:
+        if self._config_store is not None:
+            self._config_store.save(self._settings)
+
+    # -- settings dialog (docs/UX-SPEC.md §4) --------------------------------
+
+    def _open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self._settings, initial_password=self._proxy_password, parent=self)
+        if dialog.exec() != SettingsDialog.DialogCode.Accepted:
+            return
+
+        proxy_cfg: ProxyConfig | None = None
+        if dialog.proxy_enabled():
+            proxy_cfg = ProxyConfig(
+                host=dialog.proxy_host(),
+                port=dialog.proxy_port(),
+                username=dialog.proxy_username(),
+                password=dialog.proxy_password(),
+                kill_switch=dialog.kill_switch(),
+            )
+        try:
+            self._engine.configure_privacy(proxy_cfg)
+            self._engine.set_listen_port(dialog.listen_port())
+        except EngineError as exc:
+            self._show_error("설정을 적용할 수 없습니다", exc)
+            return
+
+        self._proxy_password = dialog.proxy_password()
+        self._settings = replace(
+            self._settings,
+            listen_port=dialog.listen_port(),
+            default_save_path=dialog.default_save_path(),
+            proxy=ProxySettings(
+                enabled=dialog.proxy_enabled(),
+                host=dialog.proxy_host(),
+                port=dialog.proxy_port(),
+                username=dialog.proxy_username(),
+                kill_switch=dialog.kill_switch(),
+            ),
+            on_complete=OnCompleteSettings(action=dialog.on_complete_action()),
+        )
+        self._default_save_path = self._settings.default_save_path
+        self._save_settings()
+        self._poll()
+
+    # -- on-complete action (docs/DECISIONS.md D3, docs/ARCHITECTURE.md §4.4) ----
+
+    def _track_completions(self, snapshot: list[TorrentStatus]) -> None:
+        """Remember, per torrent, whether it has ever finished *this session*.
+
+        A torrent that was already ``finished``/``seeding`` when restored
+        from resume data at startup must not immediately arm the on-complete
+        countdown — only a genuine not-finished -> finished transition
+        *observed across two polls* counts (§4.4's "이번 세션에서 최소 하나가
+        완료되었을 때"). That's why the very first time a given info-hash is
+        seen it is only recorded, never treated as a transition — otherwise
+        a torrent that's already finished on the very first poll tick after
+        construction (the common "restored from resume data" case) would
+        look identical to one that just completed.
+        """
+        current_hashes = {status.info_hash for status in snapshot}
+        for status in snapshot:
+            previously_seen = status.info_hash in self._finished_seen
+            was_finished = self._finished_seen.get(status.info_hash, False)
+            if previously_seen and status.is_finished and not was_finished:
+                self._any_completed_this_session = True
+            self._finished_seen[status.info_hash] = status.is_finished
+        for stale_hash in set(self._finished_seen) - current_hashes:
+            del self._finished_seen[stale_hash]
+
+    def _maybe_start_on_complete_countdown(self, snapshot: list[TorrentStatus]) -> None:
+        if self._countdown_active:
+            return
+        if self._settings.on_complete.action == "none":
+            return
+        if not self._any_completed_this_session:
+            return
+        if not snapshot or not all(status.is_finished for status in snapshot):
+            return
+        self._start_on_complete_countdown()
+
+    def _start_on_complete_countdown(self) -> None:
+        action = self._settings.on_complete.action
+        action_description = (
+            "시스템을 종료" if action == "shutdown_system" else "앱을 종료"
+        )
+
+        self._countdown_active = True
+        self._poll_timer.stop()
+        dialog = OnCompleteCountdownDialog(
+            _ON_COMPLETE_COUNTDOWN_S,
+            self._on_complete_still_eligible,
+            action_description=action_description,
+            parent=self,
+        )
+        result = dialog.exec()
+        self._countdown_active = False
+
+        if result == OnCompleteCountdownDialog.DialogCode.Accepted:
+            # Tears down the engine (resume-data flush) and quits/shuts down
+            # — do not touch the (now-closed) engine or restart the poll
+            # timer afterwards.
+            self._run_on_complete_action(action)
+            return
+
+        # Cancelled (manually, or auto-cancelled because a new, not-yet-
+        # finished torrent showed up mid-countdown): don't retrigger until a
+        # *new* completion happens (§5.6).
+        self._any_completed_this_session = False
+        self._poll_timer.start()
+        self._poll()
+
+    def _on_complete_still_eligible(self) -> bool:
+        """Polled once per countdown tick: is "all finished" still true?"""
+        snapshot = self._engine.snapshot()
+        return bool(snapshot) and all(status.is_finished for status in snapshot)
+
+    def _run_on_complete_action(self, action: str) -> None:
+        """Execute the opted-in action once the countdown has run out.
+
+        Resume data is always flushed first (docs/ARCHITECTURE.md §4.4) —
+        required before an OS-level shutdown, and harmless/idempotent for a
+        plain app quit (``__main__``'s own teardown would otherwise do it).
+        The actual OS shutdown call goes through the injected
+        ``system_shutdown_fn`` seam (docs/DECISIONS.md D3) — never invoked
+        without having gone through the cancellable countdown above.
+        """
+        self._engine.shutdown()
+        if action == "shutdown_system":
+            self._system_shutdown_fn()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _remove_selected(self) -> None:
         selected = self._selected_rows()

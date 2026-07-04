@@ -59,7 +59,7 @@ class UnknownTorrentError(EngineError):
 class ProxyConfigError(EngineError):
     """Proxy configuration (host/port/etc.) is invalid.
 
-    Not yet raised in v0.1.0 — ``configure_privacy`` is a type-only stub until
-    v0.4 (docs/ARCHITECTURE.md §11). Defined now so the error hierarchy is
-    stable for callers.
+    Raised by ``TorrentEngine.configure_privacy`` (docs/ARCHITECTURE.md §11,
+    §8's error-handling table) when ``ProxyConfig.host`` is empty or
+    ``ProxyConfig.port`` is out of range.
     """

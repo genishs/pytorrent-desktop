@@ -8,7 +8,25 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 ## [Unreleased]
 
-Next milestone: **0.4.0 — Privacy & automation**. See the [roadmap](docs/ROADMAP.en.md).
+Next milestone: **0.5.0 — Core complete & `.exe` packaging**. See the [roadmap](docs/ROADMAP.en.md).
+
+## [0.4.0] - 2026-07-04
+
+**Privacy & automation.** IP hiding (proxy) and on-complete actions.
+
+### Added
+- **Privacy** (engine) — `configure_privacy(ProxyConfig | None)`: SOCKS5 + `anonymous_mode` + `proxy_hostnames` + proxied peer/tracker connections; with the kill switch on, DHT/LSD/UPnP/NAT-PMP are disabled so there is no direct-connection fallback (D1). Host/port validation → `ProxyConfigError`. `privacy_status()`, `set_listen_port()`. Proxy state shown in the status bar.
+- **Settings persistence** (`core/config.py`) — `ConfigStore` saves/loads `config.json` (%APPDATA%) with default save path, proxy (host/port/user/kill-switch), on-complete action, and port, written atomically (corrupt file falls back to defaults). **The proxy password is not in the schema — memory only** (D2).
+- **Settings dialog** (`ui/dialogs.py`) — General / Privacy / On-complete tabs.
+- **On-complete action** (D3) — opt-in. When all torrents finish, a **cancellable 30-second countdown** precedes quitting the app or shutting down the system. System shutdown is isolated in a single seam (`core/system_actions.py`), **unreachable without the countdown expiring**, runs on Windows only, and flushes resume data first.
+- **Tests** — proxy-settings application, config round-trip (password never persisted), countdown/cancel, and that the shutdown seam is only ever called through a mock. 124 passing total.
+
+### Changed
+- `pyproject`/`__init__` version `0.3.0` → `0.4.0`.
+
+### Notes
+- **Real kill-switch leak prevention cannot be verified headlessly** — it needs a live proxy + packet capture. The settings combination is unit-tested; real-world verification is a manual step (noted in code/docstrings).
+- I2P anonymous mode (post-0.5) and `.exe` packaging (v0.5) are out of scope.
 
 ## [0.3.0] - 2026-07-04
 

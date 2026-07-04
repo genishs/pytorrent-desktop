@@ -27,6 +27,7 @@ from pytorrent_desktop.core.engine import EngineConfig, ProxyConfig, TorrentEngi
 from pytorrent_desktop.core.errors import (
     DuplicateTorrentError,
     InvalidMagnetError,
+    ProxyConfigError,
     SavePathError,
     TorrentFileError,
     UnknownTorrentError,
@@ -424,6 +425,138 @@ def test_blocking_flush_decrements_outstanding_on_failed_alert_too(tmp_path: Pat
         assert elapsed < 1.0  # must not have blocked anywhere near the 5s timeout
     finally:
         engine._session = real_session
+        engine.shutdown()
+
+
+# -- privacy / kill switch (v0.4.0, §11, docs/DECISIONS.md D1) ---------------
+
+
+def test_configure_privacy_applies_the_documented_no_leak_settings(tmp_path: Path) -> None:
+    """§11.1/§11.2: anonymous_mode + proxy_hostnames is the load-bearing
+    guarantee, kill_switch=True must also turn off DHT/LSD/UPnP/NAT-PMP."""
+    engine = _engine(tmp_path)
+    try:
+        engine.configure_privacy(
+            ProxyConfig(host="127.0.0.1", port=1080, username="alice", password="secret")
+        )
+        settings = engine._session.get_settings()
+        assert settings["proxy_type"] == int(lt.proxy_type_t.socks5_pw)
+        assert settings["proxy_hostname"] == "127.0.0.1"
+        assert settings["proxy_port"] == 1080
+        assert settings["proxy_username"] == "alice"
+        assert settings["proxy_password"] == "secret"
+        assert settings["proxy_hostnames"] is True
+        assert settings["proxy_peer_connections"] is True
+        assert settings["proxy_tracker_connections"] is True
+        assert settings["anonymous_mode"] is True
+        assert settings["enable_dht"] is False
+        assert settings["enable_lsd"] is False
+        assert settings["enable_upnp"] is False
+        assert settings["enable_natpmp"] is False
+        assert engine.privacy_status() == "enabled"
+    finally:
+        engine.shutdown()
+
+
+def test_configure_privacy_without_username_uses_plain_socks5(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        engine.configure_privacy(ProxyConfig(host="10.0.0.1", port=9050))
+        settings = engine._session.get_settings()
+        assert settings["proxy_type"] == int(lt.proxy_type_t.socks5)
+    finally:
+        engine.shutdown()
+
+
+def test_configure_privacy_kill_switch_off_leaves_side_channels_enabled(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        engine.configure_privacy(ProxyConfig(host="127.0.0.1", port=1080, kill_switch=False))
+        settings = engine._session.get_settings()
+        assert settings["anonymous_mode"] is True  # still the no-leak guarantee for peer/tracker
+        assert settings["enable_dht"] is True
+        assert settings["enable_lsd"] is True
+        assert settings["enable_upnp"] is True
+        assert settings["enable_natpmp"] is True
+    finally:
+        engine.shutdown()
+
+
+def test_configure_privacy_none_restores_direct_connection(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        engine.configure_privacy(ProxyConfig(host="127.0.0.1", port=1080))
+        engine.configure_privacy(None)
+        settings = engine._session.get_settings()
+        assert settings["proxy_type"] == int(lt.proxy_type_t.none)
+        assert settings["anonymous_mode"] is False
+        assert settings["enable_dht"] is True
+        assert engine.privacy_status() == "disabled"
+    finally:
+        engine.shutdown()
+
+
+def test_configure_privacy_empty_host_raises_proxy_config_error(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        with pytest.raises(ProxyConfigError):
+            engine.configure_privacy(ProxyConfig(host="", port=1080))
+    finally:
+        engine.shutdown()
+
+
+def test_configure_privacy_bad_port_raises_proxy_config_error(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        with pytest.raises(ProxyConfigError):
+            engine.configure_privacy(ProxyConfig(host="127.0.0.1", port=70000))
+        with pytest.raises(ProxyConfigError):
+            engine.configure_privacy(ProxyConfig(host="127.0.0.1", port=0))
+    finally:
+        engine.shutdown()
+
+
+def test_configure_privacy_invalid_config_does_not_change_applied_state(tmp_path: Path) -> None:
+    """A rejected reconfiguration must not silently leave a half-applied state."""
+    engine = _engine(tmp_path)
+    try:
+        engine.configure_privacy(ProxyConfig(host="127.0.0.1", port=1080))
+        with pytest.raises(ProxyConfigError):
+            engine.configure_privacy(ProxyConfig(host="", port=1080))
+        assert engine.privacy_status() == "enabled"  # previous good config still applied
+    finally:
+        engine.shutdown()
+
+
+def test_engine_applies_proxy_from_engine_config_at_construction(tmp_path: Path) -> None:
+    config = EngineConfig(
+        data_dir=tmp_path / "appdata", proxy=ProxyConfig(host="127.0.0.1", port=1080)
+    )
+    engine = TorrentEngine(config)
+    try:
+        assert engine.privacy_status() == "enabled"
+        assert engine._session.get_settings()["proxy_hostname"] == "127.0.0.1"
+    finally:
+        engine.shutdown()
+
+
+def test_set_listen_port_applies_live(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        engine.set_listen_port(7000)
+        assert engine._session.get_settings()["listen_interfaces"] == "0.0.0.0:7000"
+    finally:
+        engine.shutdown()
+
+
+def test_set_listen_port_out_of_range_raises(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            engine.set_listen_port(0)
+        with pytest.raises(ValueError):
+            engine.set_listen_port(70000)
+    finally:
         engine.shutdown()
 
 
