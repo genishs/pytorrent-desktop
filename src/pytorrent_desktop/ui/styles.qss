@@ -1,0 +1,681 @@
+/* =============================================================================
+   pytorrent-desktop — Qt Style Sheet (QSS)
+   Theme: Light, brand-neutral. Rationale + full token table: docs/DESIGN.md.
+
+   Scope: QMainWindow, QToolBar/QToolButton, QTableView/QHeaderView, QProgressBar
+   (per-row progress cell), QPushButton, QDialog, QTabWidget/QTabBar, QLineEdit,
+   QCheckBox/QRadioButton, QGroupBox, QMenu, QStatusBar, QScrollBar, QToolTip,
+   plus a small set of "role/variant" widgets (banners, toasts, empty state,
+   inline field hints) called out in docs/UX-SPEC.md.
+
+   This file only needs to be loaded by the developer:
+       with open(qss_path, "r", encoding="utf-8") as f:
+           app.setStyleSheet(f.read())
+
+   Dynamic-property contract (developer sets these with QWidget.setProperty(),
+   then calls style().unpolish(widget); style().polish(widget) to repaint):
+
+     QPushButton   [variant="primary"]          — main CTA (e.g. dialog "Add")
+     QPushButton   [variant="danger"]           — destructive (e.g. "Permanently
+                                                    delete", enabled on the
+                                                    "delete data" radio choice)
+     QLineEdit     [state="error"]              — failed inline validation
+     QProgressBar  [rowState="downloading"]     — table progress cell states,
+     QProgressBar  [rowState="paused"]            one of: downloading (default
+     QProgressBar  [rowState="queued"]            if unset), paused, queued,
+     QProgressBar  [rowState="checking"]          checking, finished, seeding,
+     QProgressBar  [rowState="finished"]          error, metadata (indeterminate)
+     QProgressBar  [rowState="seeding"]
+     QProgressBar  [rowState="error"]
+     QProgressBar  [rowState="metadata"]
+     QLabel        [role="hint"]                — gray helper text under a field
+     QLabel        [role="error"]               — red inline validation message
+     QLabel        [role="warning"]              — amber inline warning message
+     QLabel        [role="empty-state-title"]   — big centered "no torrents" text
+     QLabel        [role="empty-state-body"]    — secondary line under the title
+     QLabel        [role="proxy-ok"]             — status bar "Connected"
+     QLabel        [role="proxy-off"]            — status bar "Not configured"
+     QLabel        [role="proxy-warn"]           — status bar "Disconnected"
+     QFrame        [role="banner-warning"]      — proxy-kill-switch / restore-
+                                                    failure banner under toolbar
+     QFrame        [role="toast"]                — transient toast container
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   Base
+   ----------------------------------------------------------------------------- */
+
+* {
+    outline: none;
+}
+
+QWidget {
+    background-color: #F5F6F8;
+    color: #1E2430;
+    font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    font-size: 9pt;
+}
+
+QMainWindow {
+    background-color: #F5F6F8;
+}
+
+QToolTip {
+    background-color: #1E2430;
+    color: #FFFFFF;
+    border: 1px solid #1E2430;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 8pt;
+}
+
+/* -----------------------------------------------------------------------------
+   Toolbar
+   ----------------------------------------------------------------------------- */
+
+QToolBar {
+    background-color: #FFFFFF;
+    border: none;
+    border-bottom: 1px solid #D9DCE3;
+    padding: 6px 10px;
+    spacing: 6px;
+}
+
+QToolBar::separator {
+    background-color: #D9DCE3;
+    width: 1px;
+    margin: 4px 6px;
+}
+
+QToolButton {
+    background-color: transparent;
+    color: #1E2430;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 9pt;
+}
+
+QToolButton:hover {
+    background-color: #EDEFF3;
+    border: 1px solid #D9DCE3;
+}
+
+QToolButton:pressed {
+    background-color: #E2E5EB;
+}
+
+QToolButton:checked {
+    background-color: #EAF1FE;
+    border: 1px solid #BBD3FB;
+    color: #2F6FEB;
+}
+
+QToolButton:disabled {
+    color: #ABB1BC;
+    border: 1px solid transparent;
+    background-color: transparent;
+}
+
+/* "Add ▾" split/menu button: extra right padding so the ▾ glyph in the label
+   (see UX-SPEC §1.1 — icons are plain Unicode text, no image assets) does not
+   crowd the border. */
+QToolButton[toolbarRole="add"] {
+    padding-right: 14px;
+}
+
+/* -----------------------------------------------------------------------------
+   Menus (Add ▾ dropdown, table right-click context menu)
+   ----------------------------------------------------------------------------- */
+
+QMenu {
+    background-color: #FFFFFF;
+    border: 1px solid #D9DCE3;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 6px 24px 6px 12px;
+    border-radius: 4px;
+    color: #1E2430;
+}
+
+QMenu::item:selected {
+    background-color: #EAF1FE;
+    color: #1B4FC2;
+}
+
+QMenu::item:disabled {
+    color: #ABB1BC;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #E4E6EB;
+    margin: 4px 8px;
+}
+
+/* -----------------------------------------------------------------------------
+   Table (main torrent list) — QTableView + QHeaderView
+   ----------------------------------------------------------------------------- */
+
+QTableView {
+    background-color: #FFFFFF;
+    alternate-background-color: #F5F6F8;
+    gridline-color: #E4E6EB;
+    border: 1px solid #D9DCE3;
+    border-radius: 6px;
+    selection-background-color: #DCE9FD;
+    selection-color: #1E2430;
+}
+
+QTableView::item {
+    padding: 4px 8px;
+    border: none;
+}
+
+/* Requires the developer to call setMouseTracking(True) on the view for the
+   hover highlight to update as the pointer moves without a button held. */
+QTableView::item:hover {
+    background-color: #EEF3FC;
+}
+
+QTableView::item:selected {
+    background-color: #DCE9FD;
+    color: #16233B;
+}
+
+QTableView::item:selected:!active {
+    background-color: #E7ECF3;
+    color: #1E2430;
+}
+
+QHeaderView::section {
+    background-color: #F0F1F4;
+    color: #5C6472;
+    border: none;
+    border-bottom: 1px solid #D9DCE3;
+    border-right: 1px solid #E4E6EB;
+    padding: 6px 8px 6px 8px;
+    font-weight: 600;
+    font-size: 8pt;
+}
+
+QHeaderView::section:last {
+    border-right: none;
+}
+
+QHeaderView::section:hover {
+    background-color: #E7E9EE;
+}
+
+/* Reserve room so the OS-drawn sort arrow never overlaps the header label. */
+QHeaderView::section {
+    padding-right: 18px;
+}
+
+QHeaderView::down-arrow,
+QHeaderView::up-arrow {
+    width: 10px;
+    height: 10px;
+    subcontrol-position: center right;
+    right: 6px;
+}
+
+QTableCornerButton::section {
+    background-color: #F0F1F4;
+    border: none;
+    border-bottom: 1px solid #D9DCE3;
+}
+
+/* -----------------------------------------------------------------------------
+   Progress cell — QProgressBar used per row in the "진행률" column
+   Track = neutral, chunk color = semantic state (see docs/DESIGN.md §Semantic
+   colors). Percentage text overlay: developer sets format("%p%") and
+   setAlignment(Qt::AlignCenter) in code — QSS cannot set text alignment on
+   QProgressBar.
+   ----------------------------------------------------------------------------- */
+
+QProgressBar {
+    background-color: #EEF0F3;
+    border: 1px solid #D9DCE3;
+    border-radius: 4px;
+    color: #1E2430;
+    font-size: 8pt;
+    font-weight: 600;
+    min-height: 16px;
+    max-height: 16px;
+}
+
+QProgressBar::chunk {
+    border-radius: 3px;
+    margin: 1px;
+}
+
+/* Default / downloading — accent. */
+QProgressBar,
+QProgressBar[rowState="downloading"] {
+    border: 1px solid #D9DCE3;
+}
+QProgressBar::chunk,
+QProgressBar[rowState="downloading"]::chunk {
+    background-color: #2F6FEB;
+}
+
+/* Paused / queued / checking — neutral gray (UX-SPEC §5.1: "그레이스케일"). */
+QProgressBar[rowState="paused"],
+QProgressBar[rowState="queued"],
+QProgressBar[rowState="checking"] {
+    color: #5C6472;
+}
+QProgressBar[rowState="paused"]::chunk,
+QProgressBar[rowState="queued"]::chunk,
+QProgressBar[rowState="checking"]::chunk {
+    background-color: #9AA1AC;
+}
+
+/* Finished / seeding — success green. */
+QProgressBar[rowState="finished"]::chunk,
+QProgressBar[rowState="seeding"]::chunk {
+    background-color: #1E9E5C;
+}
+
+/* Error — red border keeps the last-known progress fill legible while
+   flagging the row (UX-SPEC §5.1: "마지막 진행률 유지 + 빨간 테두리"). */
+QProgressBar[rowState="error"] {
+    border: 1px solid #D6423F;
+    color: #B23531;
+}
+QProgressBar[rowState="error"]::chunk {
+    background-color: #C7CBD1;
+}
+
+/* Metadata fetch — indeterminate animation is native Qt behavior when
+   min == max == 0; only the chunk tint is styled here (tinted accent). */
+QProgressBar[rowState="metadata"]::chunk {
+    background-color: #9FC1FA;
+}
+
+/* -----------------------------------------------------------------------------
+   Buttons — QPushButton (dialogs: Add / Cancel / Save / Delete / Retry, etc.)
+   ----------------------------------------------------------------------------- */
+
+QPushButton {
+    background-color: #FFFFFF;
+    color: #1E2430;
+    border: 1px solid #C4C9D2;
+    border-radius: 6px;
+    padding: 7px 16px;
+    font-size: 9pt;
+    min-width: 72px;
+}
+
+QPushButton:hover {
+    background-color: #F0F1F4;
+    border-color: #B4BAC5;
+}
+
+QPushButton:pressed {
+    background-color: #E4E6EB;
+}
+
+QPushButton:disabled {
+    background-color: #F5F6F8;
+    color: #ABB1BC;
+    border-color: #E4E6EB;
+}
+
+QPushButton:focus {
+    border: 1px solid #2F6FEB;
+}
+
+QPushButton:default {
+    border: 1px solid #2F6FEB;
+}
+
+/* Primary CTA — e.g. Add-dialog "Add", Settings "Save". */
+QPushButton[variant="primary"] {
+    background-color: #2F6FEB;
+    color: #FFFFFF;
+    border: 1px solid #2560D6;
+    font-weight: 600;
+}
+
+QPushButton[variant="primary"]:hover {
+    background-color: #2560D6;
+}
+
+QPushButton[variant="primary"]:pressed {
+    background-color: #1E4FB8;
+}
+
+QPushButton[variant="primary"]:disabled {
+    background-color: #A9C3F7;
+    border-color: #A9C3F7;
+    color: #F0F4FE;
+}
+
+/* Destructive — e.g. delete-dialog "Permanently delete" once the
+   "delete data too" radio is selected (UX-SPEC §3). */
+QPushButton[variant="danger"] {
+    background-color: #D6423F;
+    color: #FFFFFF;
+    border: 1px solid #C13531;
+    font-weight: 600;
+}
+
+QPushButton[variant="danger"]:hover {
+    background-color: #C13531;
+}
+
+QPushButton[variant="danger"]:pressed {
+    background-color: #A6231F;
+}
+
+/* -----------------------------------------------------------------------------
+   Dialogs — QDialog (Add torrent, Delete confirm, Settings, Countdown)
+   ----------------------------------------------------------------------------- */
+
+QDialog {
+    background-color: #FFFFFF;
+}
+
+QDialog QLabel[role="title"] {
+    font-size: 11pt;
+    font-weight: 600;
+    color: #1E2430;
+}
+
+/* -----------------------------------------------------------------------------
+   Tabs — QTabWidget/QTabBar (Add-dialog "*.torrent file" / "Magnet link")
+   ----------------------------------------------------------------------------- */
+
+QTabWidget::pane {
+    border: 1px solid #D9DCE3;
+    border-radius: 6px;
+    background-color: #FFFFFF;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: #F0F1F4;
+    color: #5C6472;
+    border: 1px solid #D9DCE3;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 6px 16px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: #FFFFFF;
+    color: #1E2430;
+    font-weight: 600;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #E7E9EE;
+}
+
+/* -----------------------------------------------------------------------------
+   Form fields — QLineEdit
+   ----------------------------------------------------------------------------- */
+
+QLineEdit {
+    background-color: #FFFFFF;
+    color: #1E2430;
+    border: 1px solid #C4C9D2;
+    border-radius: 5px;
+    padding: 6px 8px;
+    selection-background-color: #2F6FEB;
+    selection-color: #FFFFFF;
+}
+
+QLineEdit:hover {
+    border-color: #ABB1BC;
+}
+
+QLineEdit:focus {
+    border: 1px solid #2F6FEB;
+}
+
+QLineEdit:disabled {
+    background-color: #F5F6F8;
+    color: #ABB1BC;
+    border-color: #E4E6EB;
+}
+
+/* Failed inline validation (invalid magnet URI, unwritable save path, etc.). */
+QLineEdit[state="error"] {
+    border: 1px solid #D6423F;
+    background-color: #FDEBEA;
+}
+
+QLineEdit[state="error"]:focus {
+    border: 1px solid #D6423F;
+}
+
+/* -----------------------------------------------------------------------------
+   QCheckBox / QRadioButton (dialog options)
+   ----------------------------------------------------------------------------- */
+
+QCheckBox, QRadioButton {
+    spacing: 8px;
+    color: #1E2430;
+    background-color: transparent;
+}
+
+QCheckBox:disabled, QRadioButton:disabled {
+    color: #ABB1BC;
+}
+
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #C4C9D2;
+    background-color: #FFFFFF;
+}
+
+QCheckBox::indicator {
+    border-radius: 4px;
+}
+
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #2F6FEB;
+}
+
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background-color: #2F6FEB;
+    border-color: #2F6FEB;
+}
+
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    background-color: #F5F6F8;
+    border-color: #E4E6EB;
+}
+
+/* -----------------------------------------------------------------------------
+   QGroupBox — Settings-dialog sections ("General", "Download", "Privacy", ...)
+   ----------------------------------------------------------------------------- */
+
+QGroupBox {
+    background-color: transparent;
+    border: none;
+    margin-top: 18px;
+    font-weight: 600;
+    color: #5C6472;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 0px;
+    padding: 0 0 6px 0;
+    font-size: 8pt;
+    letter-spacing: 0.4px;
+    color: #5C6472;
+}
+
+/* -----------------------------------------------------------------------------
+   Inline hint / error / warning text under form fields
+   ----------------------------------------------------------------------------- */
+
+QLabel[role="hint"] {
+    color: #5C6472;
+    font-size: 8pt;
+}
+
+QLabel[role="error"] {
+    color: #D6423F;
+    font-size: 8pt;
+    font-weight: 600;
+}
+
+QLabel[role="warning"] {
+    color: #B8790A;
+    font-size: 8pt;
+    font-weight: 600;
+}
+
+/* -----------------------------------------------------------------------------
+   Empty-state placeholder (table has zero torrents — UX-SPEC §1.3)
+   ----------------------------------------------------------------------------- */
+
+QLabel[role="empty-state-title"] {
+    color: #1E2430;
+    font-size: 11pt;
+    font-weight: 600;
+}
+
+QLabel[role="empty-state-body"] {
+    color: #5C6472;
+    font-size: 9pt;
+}
+
+/* -----------------------------------------------------------------------------
+   Banners — proxy kill-switch disconnect, session-restore failure (UX-SPEC §6)
+   ----------------------------------------------------------------------------- */
+
+QFrame[role="banner-warning"] {
+    background-color: #FFF4E0;
+    border: 1px solid #F5D68C;
+    border-radius: 6px;
+    color: #7A4E00;
+    padding: 8px 12px;
+}
+
+QFrame[role="banner-info"] {
+    background-color: #EAF1FE;
+    border: 1px solid #BBD3FB;
+    border-radius: 6px;
+    color: #1B4FC2;
+    padding: 8px 12px;
+}
+
+/* Transient toast (e.g. "no magnet link on clipboard"). */
+QFrame[role="toast"] {
+    background-color: #1E2430;
+    border-radius: 8px;
+    color: #FFFFFF;
+    padding: 10px 16px;
+}
+
+QFrame[role="toast"] QLabel {
+    background-color: transparent;
+    color: #FFFFFF;
+}
+
+/* -----------------------------------------------------------------------------
+   Status bar (bottom) — totals, active count, proxy state
+   ----------------------------------------------------------------------------- */
+
+QStatusBar {
+    background-color: #FFFFFF;
+    border-top: 1px solid #D9DCE3;
+    color: #5C6472;
+    padding: 2px 10px;
+    font-size: 8pt;
+}
+
+QStatusBar QLabel {
+    background-color: transparent;
+    padding: 0 8px;
+    color: #5C6472;
+}
+
+QStatusBar::item {
+    border: none;
+}
+
+QLabel[role="proxy-ok"] {
+    color: #1E9E5C;
+    font-weight: 600;
+}
+
+QLabel[role="proxy-off"] {
+    color: #9AA1AC;
+}
+
+QLabel[role="proxy-warn"] {
+    color: #B8790A;
+    font-weight: 600;
+}
+
+/* -----------------------------------------------------------------------------
+   Scrollbars — minimal flat style so they match the rest of the sheet once a
+   global QSS is applied (Qt falls back to a very bare default otherwise).
+   ----------------------------------------------------------------------------- */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 12px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background: #C4C9D2;
+    border-radius: 5px;
+    min-height: 24px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #ABB1BC;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 12px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #C4C9D2;
+    border-radius: 5px;
+    min-width: 24px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #ABB1BC;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent;
+}
