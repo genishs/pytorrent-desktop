@@ -12,10 +12,14 @@ docs/ARCHITECTURE.md.
 
 v0.3.0 status ("persistence & sequential queue"): resume-data persistence
 (§4.3, §5 — ``ResumeStore``, add-time/periodic/finished/shutdown saves) and
-the sequential-queue auto-managed flow (§6) are implemented. The
-SOCKS5/kill-switch privacy layer (v0.4) is still a type-only stub —
-``configure_privacy``'s hook/structure is documented at its call site so that
-milestone slots in without a facade change.
+the sequential-queue auto-managed flow (§6) are implemented.
+
+v0.4.0 status ("privacy & automation"): ``configure_privacy`` is fully
+implemented per §11/docs/DECISIONS.md D1 — SOCKS5 proxy + ``anonymous_mode``
++ ``proxy_hostnames`` as the load-bearing no-leak guarantee, with the
+kill-switch disabling DHT/LSD/UPnP/NAT-PMP. ``ProxyConfigError`` is raised
+for invalid host/port. Applied at construction from ``EngineConfig.proxy``
+and re-appliable at runtime by the settings dialog.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from .errors import (
     DuplicateTorrentError,
     EngineInitError,
     InvalidMagnetError,
+    ProxyConfigError,
     SavePathError,
     TorrentFileError,
     UnknownTorrentError,
@@ -60,9 +65,9 @@ _STATE_LABELS = {
 class ProxyConfig:
     """SOCKS5 proxy settings (docs/ARCHITECTURE.md §3.3, §11).
 
-    Type-only in v0.1.0: the dataclass is defined so the config surface is
-    stable, but :meth:`TorrentEngine.configure_privacy` does not yet apply it
-    to the session. Actual proxy/kill-switch wiring lands in v0.4.
+    ``password`` is intentionally not part of :class:`~pytorrent_desktop.core.config.ProxySettings`
+    (the persisted subset) — docs/DECISIONS.md D2 keeps it in memory only.
+    Callers (``ui/``) must re-supply it each run.
     """
 
     host: str
@@ -142,9 +147,9 @@ class TorrentEngine:
         # info_hash (hex; v1/v2/hybrid-aware, see _key_from_hashes) -> handle
         self._handles: dict[str, lt.torrent_handle] = {}
         self._closed = False
-        # Stored for a future configure_privacy implementation (v0.4); not
-        # applied to the session yet.
-        self._proxy_config: ProxyConfig | None = self._config.proxy
+        # Set for real below via configure_privacy (v0.4, §11) — None until
+        # then so a validation failure there can't leave this half-set.
+        self._proxy_config: ProxyConfig | None = None
 
         self._paths = AppPaths(self._config.data_dir)
         self._resume_store = ResumeStore(self._paths)
@@ -154,6 +159,10 @@ class TorrentEngine:
         # concurrency; auto_managed (set on every add/load below) is what
         # makes a torrent participate in that queue at all.
         self.set_sequential_queue(self._config.sequential_queue)
+
+        # Privacy/kill-switch (§11, D1): apply the configured proxy (if any)
+        # at construction, same as every other EngineConfig-derived setting.
+        self.configure_privacy(self._config.proxy)
 
         # Restore prior session state (§5.3) before the UI takes its first
         # snapshot() — no explicit UI action needed, restored torrents just
@@ -548,17 +557,121 @@ class TorrentEngine:
         method_name = self._QUEUE_MOVE_METHODS[direction]
         getattr(handle, method_name)()
 
-    # -- privacy (feature #5) ------------------------------------------------
+    # -- privacy (feature #5, v0.4.0) ----------------------------------------
 
     def configure_privacy(self, cfg: ProxyConfig | None) -> None:
         """Route all traffic through a user-supplied SOCKS5 proxy, or disable it.
 
-        TODO(v0.4): implement per docs/ARCHITECTURE.md §11 — validate
-        ``cfg.host``/``cfg.port`` (raise ``ProxyConfigError`` on bad input),
-        then ``apply_settings`` with ``anonymous_mode`` + ``proxy_hostnames``
-        as the load-bearing no-leak guarantee, and disable DHT/LSD/UPnP/
-        NAT-PMP when ``cfg.kill_switch`` is on (docs/DECISIONS.md D1). Left
-        as a type-only stub for v0.1.0: the shape of ``ProxyConfig`` is
-        finalized, but nothing is applied to the session yet.
+        Implements docs/ARCHITECTURE.md §11 / docs/DECISIONS.md D1: the
+        no-leak guarantee comes from ``anonymous_mode=True`` +
+        ``proxy_hostnames=True`` (libtorrent does not fall back to a direct
+        connection in anonymous mode), *not* from the deprecated
+        ``force_proxy`` alias. When ``cfg.kill_switch`` is on, DHT/LSD/UPnP/
+        NAT-PMP are also disabled, since those are UDP/broadcast side
+        channels that would otherwise bypass the proxy entirely (peer
+        discovery then falls back to tracker + PEX only).
+
+        ``cfg=None`` restores direct-connection mode (proxy cleared,
+        ``anonymous_mode`` off, DHT/LSD/UPnP/NAT-PMP re-enabled to whatever
+        this engine was constructed with).
+
+        Raises ``ProxyConfigError`` if ``cfg.host`` is empty or ``cfg.port``
+        is out of range — validated *before* anything is applied to the
+        session, so a bad settings-dialog submission can't half-apply.
+
+        **Verification limit (documented, not silently glossed over):**
+        confirming that the kill switch actually prevents a leak requires a
+        live proxy plus packet capture on the physical NIC
+        (docs/ARCHITECTURE.md §11.3) — that is not something a headless test
+        can do. The tests here assert the exact ``apply_settings`` payload
+        this method sends (the documented, verified-against-2.0.13 settings
+        combination), not the network behavior that payload causes.
         """
+        if cfg is None:
+            self._session.apply_settings(self._direct_connection_settings())
+            self._proxy_config = None
+            return
+
+        self._validate_proxy_config(cfg)
+        self._session.apply_settings(self._proxy_settings(cfg))
         self._proxy_config = cfg
+
+    @staticmethod
+    def _validate_proxy_config(cfg: ProxyConfig) -> None:
+        if not cfg.host or not cfg.host.strip():
+            raise ProxyConfigError("Proxy host must not be empty")
+        if not (1 <= cfg.port <= 65535):
+            raise ProxyConfigError(f"Proxy port out of range (1-65535): {cfg.port}")
+
+    def _proxy_settings(self, cfg: ProxyConfig) -> dict[str, object]:
+        """The exact settings dict for a configured proxy (§11.1, §11.2)."""
+        settings: dict[str, object] = {
+            # socks5_pw vs plain socks5 only changes whether libtorrent sends
+            # a username/password in the SOCKS5 handshake; both are accepted
+            # by apply_settings (verified against 2.0.13).
+            "proxy_type": lt.proxy_type_t.socks5_pw if cfg.username else lt.proxy_type_t.socks5,
+            "proxy_hostname": cfg.host,
+            "proxy_port": cfg.port,
+            "proxy_username": cfg.username or "",
+            "proxy_password": cfg.password or "",
+            "proxy_hostnames": True,  # resolve peer/tracker DNS through the proxy (anti-DNS-leak)
+            "proxy_peer_connections": True,
+            "proxy_tracker_connections": True,
+            "anonymous_mode": True,  # the real enforcement: no direct-connect fallback (§11.2)
+        }
+        if cfg.kill_switch:
+            settings.update(
+                enable_dht=False,  # DHT is UDP; only proxiable with a working SOCKS5 UDP-ASSOCIATE
+                enable_lsd=False,  # LSD broadcasts LAN presence, off-proxy
+                enable_upnp=False,  # UPnP/NAT-PMP talk to the router directly, off-proxy
+                enable_natpmp=False,
+            )
+        else:
+            settings.update(
+                enable_dht=self._config.enable_dht,
+                enable_lsd=True,
+                enable_upnp=True,
+                enable_natpmp=True,
+            )
+        return settings
+
+    def _direct_connection_settings(self) -> dict[str, object]:
+        """The exact settings dict for "no proxy" (direct connection) mode."""
+        return {
+            "proxy_type": lt.proxy_type_t.none,
+            "proxy_hostname": "",
+            "proxy_port": 0,
+            "proxy_username": "",
+            "proxy_password": "",
+            "anonymous_mode": False,
+            "enable_dht": self._config.enable_dht,
+            "enable_lsd": True,
+            "enable_upnp": True,
+            "enable_natpmp": True,
+        }
+
+    def privacy_status(self) -> Literal["enabled", "disabled"]:
+        """Whether a proxy is currently configured/applied (for the UI status bar).
+
+        This is deliberately a 2-state signal — "applied" vs. "not
+        configured" — and not the 3-state (미설정/연결됨/연결실패) the UX spec
+        sketches, because distinguishing "applied" from "applied but the
+        proxy connection actually failed" would require live network
+        monitoring (e.g. watching for proxy-related alerts), which is out of
+        this milestone's scope and can't be verified headlessly anyway (see
+        this method's caller-facing note on :meth:`configure_privacy`).
+        """
+        return "enabled" if self._proxy_config is not None else "disabled"
+
+    def set_listen_port(self, port: int) -> None:
+        """Change the listening port at runtime (docs/UX-SPEC.md §4 "리스닝 포트").
+
+        libtorrent accepts ``listen_interfaces`` changes live via
+        ``apply_settings`` (verified against 2.0.13) — no session restart
+        needed. ``port`` is expected to already be validated by the caller
+        (the settings dialog enforces 1024-65535); this is a defensive
+        re-check, not a second source of truth for the valid range.
+        """
+        if not (1 <= port <= 65535):
+            raise ValueError(f"Listen port out of range (1-65535): {port}")
+        self._session.apply_settings({"listen_interfaces": f"0.0.0.0:{port}"})
