@@ -8,7 +8,25 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 ## [Unreleased]
 
-Next milestone: **0.2.0 — GUI**. See the [roadmap](docs/ROADMAP.en.md).
+Next milestone: **0.3.0 — Persistence & sequential queue**. See the [roadmap](docs/ROADMAP.en.md).
+
+## [0.2.0] - 2026-07-04
+
+**GUI.** The PySide6 desktop UI, wired to the v0.1.0 engine.
+
+### Added
+- **Main window** (`ui/main_window.py`) — toolbar (Add▾ [.torrent/magnet], Pause, Resume, Remove), `QTableView` + `TorrentTableModel` (name/size/progress/↓/↑/peers/state), a **1s `QTimer` polling `engine.snapshot()`** (updates in place when unchanged so selection is preserved), a status bar (aggregate ↓/↑ rate, active/total), and a right-click context menu. Engine calls are wrapped in `EngineError` handling → `QMessageBox`.
+- **Dialogs** (`ui/dialogs.py`) — `AddTorrentDialog` (.torrent/magnet tabs + save path + "add paused", live validation) and `RemoveDialog` (list-only vs delete-data, list-only default).
+- **Entry point** (`__main__.py`) — builds `QApplication`, loads `ui/styles.qss` if present (graceful otherwise), and runs `engine.shutdown()` on exit.
+- **Styling** (`ui/styles.qss`) — light-theme QSS covering all widgets. **`docs/DESIGN.md`** (KO/EN) with design tokens and integration notes.
+- **pytest-qt UI tests** — `tests/conftest.py` (offscreen) plus model/dialog/main-window tests. Full suite: 53 passing (14 engine + 39 GUI).
+
+### Changed
+- `pyproject`/`__init__` version `0.1.0` → `0.2.0`.
+
+### Notes
+- "Add paused" is implemented as add-then-`pause()` (the engine's add signature is unchanged).
+- Settings dialog / SOCKS5 proxy (v0.4), sequential-queue UI (v0.3), and shutdown-on-complete (v0.4) are out of this milestone's scope.
 
 ## [0.1.0] - 2026-07-04
 

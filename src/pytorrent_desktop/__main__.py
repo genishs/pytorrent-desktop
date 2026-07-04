@@ -2,15 +2,22 @@
 
 The GUI (PySide6) lives in ``pytorrent_desktop.ui`` and the torrent engine
 (GUI-independent, wrapping libtorrent) lives in ``pytorrent_desktop.core``.
-This entry point wires them together. During early scaffolding it only proves
-the package is installed and the engine imports; the window is built next.
+This wires them together: build the engine, build the ``QApplication`` and
+:class:`~pytorrent_desktop.ui.main_window.MainWindow`, load an optional
+stylesheet, run the event loop, then flush the engine on the way out
+(docs/ARCHITECTURE.md §4.3 — resume-data safety on shutdown).
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 
-def main() -> None:
-    from pytorrent_desktop import __version__
+_STYLES_PATH = Path(__file__).parent / "ui" / "styles.qss"
+
+
+def main() -> int:
+    from PySide6.QtWidgets import QApplication
 
     # Import here so a missing native dependency surfaces a clear message
     # rather than failing at module import time.
@@ -19,11 +26,24 @@ def main() -> None:
     except Exception as exc:  # pragma: no cover - diagnostic path
         raise SystemExit(f"Failed to initialize torrent engine: {exc}") from exc
 
+    from pytorrent_desktop.ui.main_window import MainWindow
+
+    app = QApplication(sys.argv)
+
+    # Optional stylesheet: absence is not an error (docs task scope — must
+    # degrade gracefully when ui/styles.qss doesn't exist yet).
+    if _STYLES_PATH.is_file():
+        app.setStyleSheet(_STYLES_PATH.read_text(encoding="utf-8"))
+
     engine = TorrentEngine()
-    print(f"pytorrent-desktop {__version__} - engine ready ({engine.describe()}).")
-    print("GUI implementation in progress. See docs/SCOPE.md.")
-    engine.shutdown()
+    window = MainWindow(engine)
+    window.show()
+
+    try:
+        return app.exec()
+    finally:
+        engine.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
