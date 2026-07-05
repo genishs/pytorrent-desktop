@@ -184,3 +184,20 @@ def test_base_url_trailing_slash_is_normalized() -> None:
     provider.search("q")
 
     assert session.calls[0]["url"] == "https://btdig.example/search"
+
+
+def test_search_parses_btdig_real_structure_magnet_in_separate_anchor():
+    """Regression (live-verified 2026-07-05): btdig keeps the magnet in its own
+    <a href="magnet:..."> anchor, separate from the (non-magnet) title link. The
+    parser must read the magnet from the magnet anchor, not the title link's
+    href — the original fabricated fixture assumed the latter and live search
+    returned 0 results as a result.
+    """
+    html = (_FIXTURES_DIR / "btdig_results_real.html").read_text(encoding="utf-8")
+    provider = BtdigProvider(session=_FakeSession(_FakeResponse(html)))
+    results = provider.search("ubuntu")
+    assert len(results) == 2
+    assert results[0].title == "Ubuntu 24.04 Desktop amd64"
+    assert results[0].magnet.startswith("magnet:?xt=urn:btih:aaaaaaaaaaaa")
+    assert results[0].size_bytes == _parse_size_to_bytes("5.7 GB")
+    assert results[1].magnet.startswith("magnet:?xt=urn:btih:bbbbbbbbbbbb")

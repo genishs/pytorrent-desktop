@@ -119,6 +119,10 @@ class BtdigProvider(SearchProvider):
                 headers={"User-Agent": _USER_AGENT},
             )
             response.raise_for_status()
+            # btdig serves UTF-8, but requests defaults text/html without a
+            # charset in the HTTP header to ISO-8859-1, which mangles non-ASCII
+            # (e.g. Cyrillic/CJK) torrent names. Force UTF-8.
+            response.encoding = "utf-8"
         except requests.RequestException as exc:
             raise SearchError(f"btdig 검색 요청에 실패했습니다: {exc}") from exc
 
@@ -134,17 +138,21 @@ class BtdigProvider(SearchProvider):
         soup = BeautifulSoup(html, "html.parser")
         results: list[SearchResult] = []
         for row in soup.select("div.one_result"):
-            name_el = row.select_one(".torrent_name a")
-            if name_el is None:
+            # btdig puts the magnet in its own <a href="magnet:..."> in the
+            # row (inside div.torrent_magnet) — NOT as the title link's href.
+            # The title link (.torrent_name a) points at btdig's detail page.
+            magnet_el = row.select_one("a[href^='magnet:']")
+            if magnet_el is None:
                 # Defensive: skip a malformed row rather than failing the
                 # whole page. "Never partial/garbage results" (§9) is about
                 # not fabricating junk entries, not about refusing to skip
                 # one bad row among otherwise-good ones.
                 continue
-            magnet = (name_el.get("href") or "").strip()
+            magnet = (magnet_el.get("href") or "").strip()
             if not magnet.startswith("magnet:"):
                 continue
-            title = name_el.get_text(strip=True) or _title_from_magnet(magnet)
+            name_el = row.select_one(".torrent_name a")
+            title = (name_el.get_text(strip=True) if name_el else "") or _title_from_magnet(magnet)
 
             size_el = row.select_one(".torrent_size")
             seeders_el = row.select_one(".torrent_seeders")
