@@ -7,7 +7,8 @@ themselves (that's :class:`MainWindow`'s job).
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import pytest
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLabel, QPushButton
 
@@ -18,8 +19,14 @@ from pytorrent_desktop.core.config import (
     SearchSettings,
 )
 from pytorrent_desktop.core.errors import SearchError
-from pytorrent_desktop.core.search.base import SearchProvider, SearchResult
+from pytorrent_desktop.core.search.base import PAGE_SIZE, SearchProvider, SearchResult
 from pytorrent_desktop.ui.dialogs import (
+    _COL_AGE,
+    _COL_FILES,
+    _COL_SEEDERS,
+    _COL_SIZE,
+    _COL_SOURCE,
+    _COL_TITLE,
     AddTorrentDialog,
     OnCompleteCountdownDialog,
     RemoveDialog,
@@ -27,6 +34,7 @@ from pytorrent_desktop.ui.dialogs import (
     SearchDialog,
     SearchResultDetailDialog,
     SettingsDialog,
+    _parse_age_to_days,
     is_valid_magnet,
 )
 
@@ -482,18 +490,31 @@ def test_consent_dialog_checkbox_text_states_user_responsibility(qtbot):
 
 
 class _StubProvider(SearchProvider):
+    """Test double supporting paging: ``results`` (or ``pages[0]``) is page 0,
+    ``pages`` maps page number -> that page's results for multi-page tests.
+    """
+
     name = "stub"
 
-    def __init__(self, results=None, error: Exception | None = None) -> None:
-        self._results = results or []
+    def __init__(
+        self,
+        results=None,
+        error: Exception | None = None,
+        pages: dict[int, list[SearchResult]] | None = None,
+    ) -> None:
+        self._pages: dict[int, list[SearchResult]] = dict(pages or {})
+        if results is not None:
+            self._pages.setdefault(0, list(results))
         self._error = error
         self.queries: list[str] = []
+        self.pages_requested: list[int] = []
 
-    def search(self, query: str, *, timeout: float = 10.0) -> list[SearchResult]:
+    def search(self, query: str, *, page: int = 0, timeout: float = 10.0) -> list[SearchResult]:
         self.queries.append(query)
+        self.pages_requested.append(page)
         if self._error is not None:
             raise self._error
-        return list(self._results)
+        return list(self._pages.get(page, []))
 
 
 def _make_result(**overrides) -> SearchResult:
@@ -709,6 +730,386 @@ def test_search_dialog_forwards_probe_dht_peers_fn_to_detail_dialog(qtbot, monke
     dialog._open_detail_dialog(0, 0)
 
     assert captured == [probe_fn]
+
+
+# -- SearchDialog paging ("더 보기", 2026-07) ----------------------------------
+
+
+def test_search_dialog_more_button_hidden_before_any_search(qtbot):
+    dialog = SearchDialog(_StubProvider())
+    qtbot.addWidget(dialog)
+    assert not dialog._more_button.isVisible()
+
+
+def test_search_dialog_more_button_hidden_when_first_page_is_short(qtbot):
+    provider = _StubProvider([_make_result()])  # 1 result, well under PAGE_SIZE
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert not dialog._more_button.isVisible()
+
+
+def test_search_dialog_more_button_shown_when_first_page_is_full(qtbot):
+    full_page = [_make_result(title=f"item{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(full_page)
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert dialog._more_button.isVisible()
+    assert provider.pages_requested == [0]
+
+
+def test_search_dialog_more_button_appends_next_page_without_clearing_table(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    page1 = [_make_result(title="p1-only", info_hash="9" * 40)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+
+    dialog._more_button.click()
+
+    assert provider.pages_requested == [0, 1]
+    assert provider.queries == ["q", "q"]
+    assert dialog.results_table.rowCount() == PAGE_SIZE + 1
+    assert dialog.results_table.item(0, 0).text() == "p0-0"  # earlier rows untouched
+    assert dialog.results_table.item(PAGE_SIZE, 0).text() == "p1-only"
+    assert dialog.results_count() == PAGE_SIZE + 1
+    # page1 is short (1 < PAGE_SIZE) -> no further page, button hides again.
+    assert not dialog._more_button.isVisible()
+
+
+def test_search_dialog_more_button_stays_visible_across_consecutive_full_pages(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"a{i:039d}") for i in range(PAGE_SIZE)]
+    page1 = [_make_result(title=f"p1-{i}", info_hash=f"b{i:039d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._more_button.click()
+
+    assert dialog.results_table.rowCount() == PAGE_SIZE * 2
+    assert dialog._more_button.isVisible()  # page1 was also full -> may be more
+
+
+def test_search_dialog_more_button_dedupes_by_info_hash(qtbot):
+    """Defensive dedup: even if a page re-returns an info_hash already shown
+    (btdig's own pages don't overlap, but this guards against a provider bug),
+    the duplicate must not be appended twice."""
+    shared_hash = "d" * 40
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"c{i:039d}") for i in range(PAGE_SIZE - 1)]
+    page0.append(_make_result(title="dup", info_hash=shared_hash))
+    page1 = [_make_result(title="dup-again", info_hash=shared_hash)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+
+    dialog._more_button.click()
+
+    # page1's only result was a duplicate -> nothing appended, but the fetch
+    # still happened (this isn't the "page was short" case, it's dedup).
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+    assert dialog.results_count() == PAGE_SIZE
+
+
+def test_search_dialog_more_button_failure_shows_inline_error_and_hides_button(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(pages={0: page0})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog._more_button.isVisible()
+
+    provider._error = SearchError("network down")
+    dialog._more_button.click()  # must not raise
+
+    assert not dialog._more_button.isVisible()
+    assert "오류" in dialog.status_label.text()
+    # rows already shown before the failed "더 보기" fetch stay put.
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+
+
+def test_search_dialog_new_search_resets_paging_state(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(pages={0: page0})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog._more_button.isVisible()
+
+    provider._pages = {0: [_make_result(title="fresh", info_hash="e" * 40)]}
+    dialog.query_edit.setText("new query")
+    dialog._run_search()
+
+    assert provider.pages_requested[-1] == 0  # started over at page 0
+    assert dialog.results_table.rowCount() == 1
+    assert dialog.results_table.item(0, 0).text() == "fresh"
+    assert not dialog._more_button.isVisible()  # short page -> hidden again
+
+
+def test_search_dialog_status_label_shows_result_count(qtbot):
+    provider = _StubProvider([_make_result(), _make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert "2" in dialog.status_label.text()
+
+
+# -- age-to-days sort-key parsing ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("age_text", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("something unparseable", None),
+        ("found just now", 0.0),
+        ("found today", 0.0),
+        ("found 30 minutes ago", 30 / 1440),
+        ("found 5 hours ago", 5 / 24),
+        ("found 2 months ago", 60.0),
+        ("found 11 months ago", 330.0),
+        ("found 4 years ago", 1460.0),
+        ("found 1 day ago", 1.0),
+        ("found 3 weeks ago", 21.0),
+    ],
+)
+def test_parse_age_to_days(age_text, expected):
+    actual = _parse_age_to_days(age_text)
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual == pytest.approx(expected)
+
+
+def test_parse_age_to_days_orders_recent_before_old_before_unknown():
+    values = [
+        _parse_age_to_days("found 2 months ago"),
+        _parse_age_to_days("found 11 months ago"),
+        _parse_age_to_days("found 4 years ago"),
+    ]
+    assert values == sorted(values)  # strictly increasing == already in order
+    assert _parse_age_to_days("garbage") is None  # unknown sorts after all of the above
+
+
+# -- SearchDialog client-side column sort (2026-07) ----------------------------
+
+
+def test_search_dialog_sort_by_size_is_numeric_not_lexicographic(qtbot):
+    """Lexicographic sort would put "1000 B" before "128 B" (wrong); the
+    numeric size_bytes key must sort them the other way around."""
+    provider = _StubProvider(
+        [_make_result(title="big", size_bytes=1000), _make_result(title="small", size_bytes=128)]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SIZE)  # ascending
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "small"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "big"
+
+
+def test_search_dialog_sort_by_num_files_is_numeric(qtbot):
+    provider = _StubProvider(
+        [_make_result(title="many", num_files=120), _make_result(title="few", num_files=3)]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_FILES)
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "few"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "many"
+
+
+def test_search_dialog_sort_by_age_puts_most_recent_first(qtbot):
+    provider = _StubProvider(
+        [
+            _make_result(title="oldest", age="found 4 years ago"),
+            _make_result(title="newest", age="found 2 months ago"),
+            _make_result(title="middle", age="found 11 months ago"),
+        ]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_AGE)
+
+    titles = [dialog.results_table.item(row, _COL_TITLE).text() for row in range(3)]
+    assert titles == ["newest", "middle", "oldest"]
+
+
+def test_search_dialog_sort_none_values_always_last_ascending_and_descending(qtbot):
+    provider = _StubProvider(
+        [
+            _make_result(title="unknown", size_bytes=None),
+            _make_result(title="huge", size_bytes=999),
+            _make_result(title="tiny", size_bytes=1),
+        ]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SIZE)  # ascending: tiny, huge, unknown
+    assert [dialog.results_table.item(r, _COL_TITLE).text() for r in range(3)] == [
+        "tiny",
+        "huge",
+        "unknown",
+    ]
+
+    dialog._on_header_clicked(_COL_SIZE)  # click again -> descending: huge, tiny, unknown
+    assert [dialog.results_table.item(r, _COL_TITLE).text() for r in range(3)] == [
+        "huge",
+        "tiny",
+        "unknown",
+    ]
+
+
+def test_search_dialog_sort_by_title_is_case_insensitive(qtbot):
+    provider = _StubProvider([_make_result(title="banana"), _make_result(title="Apple")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_TITLE)
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "Apple"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "banana"
+
+
+def test_search_dialog_sort_by_source(qtbot):
+    provider = _StubProvider(
+        [_make_result(title="b", source="zeta"), _make_result(title="a", source="alpha")]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SOURCE)
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "a"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "b"
+
+
+def test_search_dialog_sort_by_seeders_is_numeric_with_none_last(qtbot):
+    """Not explicitly a btdig field (always None for btdig, docs/SCOPE.md),
+    but the column exists in the table and other providers may report it —
+    sorting it numerically with None-last follows the same rule as size/files."""
+    provider = _StubProvider(
+        [
+            _make_result(title="unknown", seeders=None),
+            _make_result(title="popular", seeders=50),
+            _make_result(title="rare", seeders=1),
+        ]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SEEDERS)
+
+    assert [dialog.results_table.item(r, _COL_TITLE).text() for r in range(3)] == [
+        "rare",
+        "popular",
+        "unknown",
+    ]
+
+
+def test_search_dialog_active_sort_is_reapplied_after_more_results_appended(qtbot):
+    """"더 보기" must not simply tack the new page onto the end while a sort
+    is active — the newly-arrived rows have to be merged into the existing
+    sort order."""
+    page0 = [_make_result(title="p0-mid", size_bytes=50, info_hash="1" * 40)]
+    page0 += [
+        _make_result(title=f"p0-{i}", size_bytes=100 + i, info_hash=f"{i:040d}")
+        for i in range(PAGE_SIZE - 1)
+    ]
+    page1 = [_make_result(title="p1-smallest", size_bytes=1, info_hash="9" * 40)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog._on_header_clicked(_COL_SIZE)  # ascending by size
+
+    dialog._more_button.click()
+
+    # After re-sorting the merged (page0 + page1) set ascending by size, the
+    # smallest overall (page1's late-arriving row) must be first, not last.
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "p1-smallest"
+
+
+def test_search_dialog_new_search_resets_sort_state(qtbot):
+    provider = _StubProvider([_make_result(title="banana"), _make_result(title="Apple")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog._on_header_clicked(_COL_TITLE)
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "Apple"
+
+    provider._pages = {0: [_make_result(title="zzz"), _make_result(title="aaa")]}
+    dialog.query_edit.setText("new query")
+    dialog._run_search()
+
+    # Fresh search -> arrival order restored (no leftover sort applied).
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "zzz"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "aaa"
+    assert dialog._sort_column is None
+
+
+def test_search_dialog_header_click_sorts_via_real_mouse_click(qtbot):
+    """One end-to-end check that clicking the actual header section (not
+    just calling the handler directly) triggers the sort."""
+    provider = _StubProvider([_make_result(title="banana"), _make_result(title="Apple")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    header = dialog.results_table.horizontalHeader()
+    x = header.sectionViewportPosition(_COL_TITLE) + 5
+    qtbot.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(x, 5))
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "Apple"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "banana"
+    assert dialog.results_table.horizontalHeader().isSortIndicatorShown()
 
 
 # -- SearchResultDetailDialog (v0.5.1a, EXPERIMENTAL/ALPHA) -------------------

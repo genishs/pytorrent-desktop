@@ -103,8 +103,52 @@ def test_search_sends_query_and_timeout_through_to_the_session() -> None:
     assert len(session.calls) == 1
     call = session.calls[0]
     assert call["url"] == "https://btdig.example/search"
-    assert call["params"] == {"q": "my query"}
+    assert call["params"] == {"q": "my query", "p": 0}
     assert call["timeout"] == 7.5
+
+
+# -- paging: btdig's ``p`` (0-based) query param, live-verified 2026-07-05 ----
+
+
+def test_search_defaults_to_page_0_when_page_is_not_passed() -> None:
+    session = _FakeSession(_FakeResponse(_fixture("btdig_results.html")))
+    provider = BtdigProvider(session=session)
+
+    provider.search("ubuntu")
+
+    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 0}
+
+
+def test_search_sends_the_page_argument_as_the_p_param() -> None:
+    session = _FakeSession(_FakeResponse(_fixture("btdig_results.html")))
+    provider = BtdigProvider(session=session)
+
+    provider.search("ubuntu", page=1)
+
+    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 1}
+
+
+def test_search_page_2_uses_p_equals_2() -> None:
+    session = _FakeSession(_FakeResponse(_fixture("btdig_results.html")))
+    provider = BtdigProvider(session=session)
+
+    provider.search("ubuntu", page=2)
+
+    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 2}
+
+
+def test_search_different_pages_can_return_different_fixtures() -> None:
+    """Simulates btdig returning a different set of rows per page: the
+    provider must simply parse+return whatever the (fake) page 1 response
+    contains, with no special-casing of the page number itself."""
+    session = _FakeSession(_FakeResponse(_fixture("btdig_results_real.html")))
+    provider = BtdigProvider(session=session)
+
+    page1_results = provider.search("ubuntu", page=1)
+
+    assert session.calls[0]["params"]["p"] == 1
+    assert len(page1_results) == 2
+    assert page1_results[0].title == "Ubuntu 24.04 Desktop amd64"
 
 
 def test_search_with_empty_query_returns_empty_without_a_network_call() -> None:

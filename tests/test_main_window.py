@@ -546,7 +546,7 @@ def test_on_complete_countdown_uses_the_configured_duration(qtbot, monkeypatch):
 class _FakeProvider(SearchProvider):
     name = "fake-provider"
 
-    def search(self, query: str, *, timeout: float = 10.0) -> list:
+    def search(self, query: str, *, page: int = 0, timeout: float = 10.0) -> list:
         return []
 
 

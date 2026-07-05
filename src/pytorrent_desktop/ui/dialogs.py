@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 
 from pytorrent_desktop.core.config import AppSettings
 from pytorrent_desktop.core.errors import SearchError
-from pytorrent_desktop.core.search.base import SearchProvider, SearchResult
+from pytorrent_desktop.core.search.base import PAGE_SIZE, SearchProvider, SearchResult
 from pytorrent_desktop.ui.models import format_size
 
 # docs/UX-SPEC.md §2.3: real-time inline validation gates the Add button.
@@ -843,6 +843,73 @@ def _files_preview_lines(files: list[str] | str | None) -> list[str]:
     return list(files)
 
 
+# -- column sort keys (client-side sort, added 2026-07) -----------------------
+#
+# btdig ignores any order/sort/date/size-style query parameter (live-verified
+# 2026-07) — there is no server-side sort to ask for, so SearchDialog sorts
+# whatever results are currently loaded (across however many "더 보기" pages
+# have been appended) entirely client-side, re-applying the active sort each
+# time a new page is appended.
+
+_AGE_UNIT_TO_DAYS = {
+    "minute": 1 / 1440,
+    "hour": 1 / 24,
+    "day": 1.0,
+    "week": 7.0,
+    "month": 30.0,
+    "year": 365.0,
+}
+_AGE_PATTERN = re.compile(r"(\d+)\s*(minute|hour|day|week|month|year)s?\s*ago", re.IGNORECASE)
+_AGE_RECENT_PATTERN = re.compile(r"\b(just now|today)\b", re.IGNORECASE)
+
+
+def _parse_age_to_days(age: str | None) -> float | None:
+    """Approximate btdig's ``"found N <unit> ago"`` text as a day count for
+    sorting — smaller means more recently found. Returns ``None`` for
+    missing/unrecognized text (never raises/fabricates a value), which the
+    sort-key wiring below always places last regardless of sort direction.
+
+    Units are approximated (month=30 days, year=365 days) since this is only
+    ever used to *order* rows, never displayed or used for anything exact.
+    """
+    if not age:
+        return None
+    if _AGE_RECENT_PATTERN.search(age):
+        return 0.0
+    match = _AGE_PATTERN.search(age)
+    if not match:
+        return None
+    count_text, unit = match.groups()
+    try:
+        count = int(count_text)
+    except ValueError:
+        return None
+    return count * _AGE_UNIT_TO_DAYS[unit.lower()]
+
+
+def _sort_key_title(result: SearchResult):
+    return result.title.casefold()
+
+
+def _sort_key_source(result: SearchResult):
+    return result.source.casefold()
+
+
+# One key function per sortable column. Each returns None for "unknown" so
+# _sorted_results (below) can always sink None-valued rows to the bottom,
+# regardless of ascending/descending — a plain reverse=True would instead
+# put None-valued rows first on a descending sort, which reads as "these are
+# the biggest/newest," the opposite of what "unknown" should mean.
+_SORT_KEY_FNS: dict[int, Callable[[SearchResult], object]] = {
+    _COL_TITLE: _sort_key_title,
+    _COL_SIZE: lambda result: result.size_bytes,
+    _COL_FILES: lambda result: result.num_files,
+    _COL_AGE: lambda result: _parse_age_to_days(result.age),
+    _COL_SEEDERS: lambda result: result.seeders,
+    _COL_SOURCE: _sort_key_source,
+}
+
+
 class SearchDialog(QDialog):
     """EXPERIMENTAL/ALPHA search dialog (v0.5.1a, docs/ARCHITECTURE.md §9).
 
@@ -864,7 +931,20 @@ class SearchDialog(QDialog):
     Runs each query synchronously on the Qt main thread (blocking this modal
     dialog, not the rest of the app, for the HTTP round-trip) — acceptable
     for this experimental/alpha milestone; docs/ARCHITECTURE.md §9 sketches
-    a worker-thread version as the eventual non-alpha design.
+    a worker-thread version as the eventual non-alpha design. "더 보기"
+    (load-more paging, added 2026-07) shares this same trade-off: it is just
+    another synchronous ``provider.search`` call on the main thread, disabling
+    itself and showing "불러오는 중…" for the duration so the button can't be
+    double-clicked mid-request, rather than introducing a worker thread.
+
+    Paging: each provider page is nominally :data:`PAGE_SIZE` (btdig: 10)
+    results. A fresh query always fetches page 0 and resets all paging state;
+    "더 보기" fetches ``page=<next page>`` for the *same* query and appends
+    the results to the table instead of replacing it. "더 보기" is only shown
+    when the just-fetched page came back full (``== PAGE_SIZE``) — a short or
+    empty page is taken to mean there is nothing further to fetch. Results are
+    deduplicated by ``info_hash`` across pages as a defensive measure (btdig's
+    own pages don't overlap, but a provider bug or a different provider might).
     """
 
     def __init__(
@@ -888,9 +968,27 @@ class SearchDialog(QDialog):
         # itself, only invokes whatever callable MainWindow wired up around
         # TorrentEngine.probe_dht_peers. Forwarded as-is to the detail dialog.
         self._probe_dht_peers_fn = probe_dht_peers_fn
+        # ``_results`` is the canonical arrival-order list (all pages loaded
+        # so far, used for dedup + the total-count status text).
+        # ``_displayed_results`` is whatever order is currently on screen
+        # (arrival order, or sorted — see the "sorting" note above) and is
+        # what row-index lookups (double-click, "다운로드 추가") must index
+        # into, since that's what actually lines up with the table's rows.
         self._results: list[SearchResult] = []
+        self._displayed_results: list[SearchResult] = []
         self._selected_magnet: str | None = None
         self._selected_save_path: str | None = None
+        # Paging state (docs/UX note above): which query "더 보기" continues,
+        # which page it fetches next, and which info_hashes are already on
+        # the table (dedup safety net across pages).
+        self._current_query: str | None = None
+        self._next_page = 0
+        self._seen_info_hashes: set[str] = set()
+        # Sort state (client-side only — btdig ignores any sort-style query
+        # param, live-verified 2026-07): which column is currently sorted and
+        # in which direction, or None for "still in arrival order".
+        self._sort_column: int | None = None
+        self._sort_order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
 
         banner = QLabel(_SEARCH_LEGAL_NOTICE, self)
         banner.setWordWrap(True)
@@ -920,6 +1018,21 @@ class SearchDialog(QDialog):
         # 더블클릭 -> 상세보기 (제목만으로는 어떤 파일인지 구별하기 어렵다는
         # 문제의 해결책): opens SearchResultDetailDialog for that row.
         self.results_table.cellDoubleClicked.connect(self._open_detail_dialog)
+        # Column-header click -> client-side sort (docs/UX note above); the
+        # table itself never auto-sorts (setSortingEnabled is intentionally
+        # left False) since the None-last / parsed-age sort keys need custom
+        # logic setSortingEnabled's built-in item comparison can't express.
+        self.results_table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+
+        # "더 보기": only shown once a full (== PAGE_SIZE) page has been
+        # fetched, hidden again by every fresh search until then.
+        self._more_button = QPushButton("더 보기", self)
+        self._more_button.setVisible(False)
+        self._more_button.clicked.connect(self._load_more_results)
+        more_row = QHBoxLayout()
+        more_row.addStretch(1)
+        more_row.addWidget(self._more_button)
+        more_row.addStretch(1)
 
         self._download_button = QPushButton("다운로드 추가", self)
         self._download_button.setProperty("variant", "primary")
@@ -936,6 +1049,7 @@ class SearchDialog(QDialog):
         layout.addLayout(query_row)
         layout.addWidget(self.status_label)
         layout.addWidget(self.results_table)
+        layout.addLayout(more_row)
         layout.addWidget(self._buttons)
 
     # -- search --------------------------------------------------------------
@@ -946,23 +1060,76 @@ class SearchDialog(QDialog):
             return
         self.results_table.setRowCount(0)
         self._results = []
+        self._displayed_results = []
+        self._seen_info_hashes = set()
+        self._current_query = query
+        self._next_page = 0
         self._download_button.setEnabled(False)
+        self._more_button.setVisible(False)
+        # A fresh search starts back in arrival order (docs/UX note above).
+        self._sort_column = None
+        self._sort_order = Qt.SortOrder.AscendingOrder
+        self.results_table.horizontalHeader().setSortIndicatorShown(False)
         self._set_status("검색 중…")
+        self._fetch_page(page=0)
+
+    def _load_more_results(self) -> None:
+        """"더 보기": fetch the next page for the same query and append it."""
+        if self._current_query is None:
+            return
+        self._more_button.setEnabled(False)
+        self._more_button.setText("불러오는 중…")
+        self._fetch_page(page=self._next_page)
+
+    def _fetch_page(self, *, page: int) -> None:
+        assert self._current_query is not None
         try:
-            results = self._provider.search(query, timeout=self._timeout)
+            results = self._provider.search(self._current_query, page=page, timeout=self._timeout)
         except SearchError as exc:
             self._set_status(f"검색 오류: {exc}")
+            self._more_button.setVisible(False)
+            self._reset_more_button_idle()
             return
-        self._results = results
-        if not results:
-            self._set_status("검색 결과가 없습니다")
-            return
-        self._set_status(f"{len(results)}개 결과")
-        self._populate_results(results)
+        self._reset_more_button_idle()
+        self._next_page = page + 1
 
-    def _populate_results(self, results: list[SearchResult]) -> None:
-        self.results_table.setRowCount(len(results))
-        for row, result in enumerate(results):
+        new_results = [result for result in results if self._register_if_new(result)]
+        self._results.extend(new_results)
+        if self._sort_column is not None:
+            # A sort is active: the newly-appended rows have to be merged
+            # into it, not just tacked onto the end, so re-render from the
+            # full (now-larger) canonical list, freshly sorted.
+            self._render_table(self._sorted_results())
+        else:
+            self._displayed_results.extend(new_results)
+            self._append_rows(new_results)
+
+        if not self._results:
+            self._set_status("검색 결과가 없습니다")
+        else:
+            self._set_status(f"{len(self._results)}개 표시")
+        # A short (or empty) page means there is nothing more to fetch;
+        # only a full page justifies offering another one.
+        self._more_button.setVisible(len(results) == PAGE_SIZE)
+
+    def _register_if_new(self, result: SearchResult) -> bool:
+        """Dedup safety net across pages (keyed by info_hash when known)."""
+        if result.info_hash is None:
+            return True
+        if result.info_hash in self._seen_info_hashes:
+            return False
+        self._seen_info_hashes.add(result.info_hash)
+        return True
+
+    def _reset_more_button_idle(self) -> None:
+        self._more_button.setEnabled(True)
+        self._more_button.setText("더 보기")
+
+    def _append_rows(self, results: list[SearchResult]) -> None:
+        start_row = self.results_table.rowCount()
+        self.results_table.setRowCount(start_row + len(results))
+        for offset, result in enumerate(results):
+            row = start_row + offset
             self.results_table.setItem(row, _COL_TITLE, QTableWidgetItem(result.title))
             self.results_table.setItem(
                 row, _COL_SIZE, QTableWidgetItem(_format_optional_size(result.size_bytes))
@@ -978,9 +1145,54 @@ class SearchDialog(QDialog):
             )
             self.results_table.setItem(row, _COL_SOURCE, QTableWidgetItem(result.source))
 
+    def _render_table(self, results: list[SearchResult]) -> None:
+        """Full re-render of the table from ``results`` (used for sorting,
+        where rows aren't simply appended at the end)."""
+        self._displayed_results = list(results)
+        self.results_table.setRowCount(0)
+        self._append_rows(results)
+
     def _set_status(self, text: str) -> None:
         self.status_label.setText(text)
         self.status_label.setVisible(bool(text))
+
+    # -- sorting ("column header click", client-side only) --------------------
+
+    def _on_header_clicked(self, column: int) -> None:
+        if column not in _SORT_KEY_FNS:
+            return
+        if self._sort_column == column:
+            self._sort_order = (
+                Qt.SortOrder.DescendingOrder
+                if self._sort_order == Qt.SortOrder.AscendingOrder
+                else Qt.SortOrder.AscendingOrder
+            )
+        else:
+            self._sort_column = column
+            self._sort_order = Qt.SortOrder.AscendingOrder
+        header = self.results_table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(column, self._sort_order)
+        self._render_table(self._sorted_results())
+
+    def _sorted_results(self) -> list[SearchResult]:
+        """``self._results`` (arrival order) sorted by the active column.
+
+        Rows whose sort key is ``None`` (unknown/unparseable) always sink to
+        the bottom, in *either* direction — a plain ``reverse=True`` would
+        instead float them to the top on a descending sort, which would read
+        as "biggest/newest," the opposite of what "unknown" means. Achieved
+        with two stable sorts: sort the known-value rows in the requested
+        direction, then append the unknown ones (in their original arrival
+        order) after them.
+        """
+        if self._sort_column is None:
+            return list(self._results)
+        key_fn = _SORT_KEY_FNS[self._sort_column]
+        known = [r for r in self._results if key_fn(r) is not None]
+        unknown = [r for r in self._results if key_fn(r) is None]
+        known.sort(key=key_fn, reverse=self._sort_order == Qt.SortOrder.DescendingOrder)
+        return known + unknown
 
     # -- selection / download -------------------------------------------------
 
@@ -992,9 +1204,9 @@ class SearchDialog(QDialog):
         if not selected_rows:
             return
         row = next(iter(selected_rows))
-        if row >= len(self._results):
+        if row >= len(self._displayed_results):
             return
-        result = self._results[row]
+        result = self._displayed_results[row]
 
         directory = QFileDialog.getExistingDirectory(
             self, "저장 경로 선택", self._default_save_path
@@ -1015,10 +1227,10 @@ class SearchDialog(QDialog):
         are still alive" complaint the result list itself can only hint at
         with the 파일수/발견 columns.
         """
-        if row >= len(self._results):
+        if row >= len(self._displayed_results):
             return
         dialog = SearchResultDetailDialog(
-            self._results[row],
+            self._displayed_results[row],
             probe_dht_peers_fn=self._probe_dht_peers_fn,
             probe_timeout=self._timeout,
             parent=self,

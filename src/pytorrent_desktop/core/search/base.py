@@ -18,6 +18,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+# Nominal results-per-page every provider currently returns (btdig's page
+# size, live-verified 2026-07-05). Callers use this to decide whether a
+# "more results" affordance should be offered: a page shorter than this is
+# taken to mean "no more pages" (see ui/dialogs.py's SearchDialog).
+PAGE_SIZE = 10
+
 
 @dataclass(frozen=True)
 class SearchResult:
@@ -73,8 +79,17 @@ class SearchProvider(ABC):
     name: str
 
     @abstractmethod
-    def search(self, query: str, *, timeout: float = 10.0) -> list[SearchResult]:
+    def search(
+        self, query: str, *, page: int = 0, timeout: float = 10.0
+    ) -> list[SearchResult]:
         """Query for ``query`` and return matching results (possibly empty).
+
+        ``page`` is 0-based (page 0 is the first/default page); passing the
+        same ``query`` with an incrementing ``page`` is how a caller fetches
+        "more results" without ever bulk-fetching every page up front
+        (docs/SCOPE.md: paging is explicit and caller-driven, never a
+        provider-side crawl). Existing callers that don't pass ``page`` keep
+        getting page 0, unchanged.
 
         Must raise :class:`~pytorrent_desktop.core.errors.SearchError`
         (never a raw network/parsing exception) on failure, and must never

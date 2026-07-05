@@ -159,7 +159,9 @@ class BtdigProvider(SearchProvider):
         self._base_url = base_url.rstrip("/") or DEFAULT_BASE_URL
         self._session = session or requests.Session()
 
-    def search(self, query: str, *, timeout: float = 10.0) -> list[SearchResult]:
+    def search(
+        self, query: str, *, page: int = 0, timeout: float = 10.0
+    ) -> list[SearchResult]:
         query = query.strip()
         if not query:
             return []
@@ -167,7 +169,10 @@ class BtdigProvider(SearchProvider):
         try:
             response = self._session.get(
                 f"{self._base_url}/search",
-                params={"q": query},
+                # btdig pages results 0-based via ``p`` (its ``page`` query
+                # param is silently ignored) — live-verified 2026-07-05:
+                # ``p=1`` returns the next ~PAGE_SIZE results after ``p=0``.
+                params={"q": query, "p": page},
                 timeout=timeout,
                 headers={"User-Agent": _USER_AGENT},
             )

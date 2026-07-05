@@ -24,7 +24,7 @@ class FakeProvider(SearchProvider):
     def __init__(self, results: list[SearchResult] | None = None) -> None:
         self._results = results or []
 
-    def search(self, query: str, *, timeout: float = 10.0) -> list[SearchResult]:
+    def search(self, query: str, *, page: int = 0, timeout: float = 10.0) -> list[SearchResult]:
         return list(self._results)
 
 
