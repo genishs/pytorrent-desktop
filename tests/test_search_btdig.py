@@ -103,7 +103,7 @@ def test_search_sends_query_and_timeout_through_to_the_session() -> None:
     assert len(session.calls) == 1
     call = session.calls[0]
     assert call["url"] == "https://btdig.example/search"
-    assert call["params"] == {"q": "my query", "p": 0}
+    assert call["params"] == {"q": "my query", "p": 0, "order": 2}
     assert call["timeout"] == 7.5
 
 
@@ -116,7 +116,7 @@ def test_search_defaults_to_page_0_when_page_is_not_passed() -> None:
 
     provider.search("ubuntu")
 
-    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 0}
+    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 0, "order": 2}
 
 
 def test_search_sends_the_page_argument_as_the_p_param() -> None:
@@ -125,7 +125,7 @@ def test_search_sends_the_page_argument_as_the_p_param() -> None:
 
     provider.search("ubuntu", page=1)
 
-    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 1}
+    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 1, "order": 2}
 
 
 def test_search_page_2_uses_p_equals_2() -> None:
@@ -134,7 +134,7 @@ def test_search_page_2_uses_p_equals_2() -> None:
 
     provider.search("ubuntu", page=2)
 
-    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 2}
+    assert session.calls[0]["params"] == {"q": "ubuntu", "p": 2, "order": 2}
 
 
 def test_search_different_pages_can_return_different_fixtures() -> None:

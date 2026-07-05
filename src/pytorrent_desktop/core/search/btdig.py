@@ -38,6 +38,11 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://btdig.com"
 
+# btdig sort mode (numeric): order=2 = most-recently-found first (recency).
+# Used as the default so freshly-seen (more likely still-alive) torrents surface
+# first, instead of btdig's relevance ordering which mixes in decade-old results.
+_DEFAULT_ORDER = 2
+
 _USER_AGENT = (
     "pytorrent-desktop/0.5.1a (experimental search feature; "
     "+https://github.com/genishs/pytorrent-desktop)"
@@ -172,7 +177,7 @@ class BtdigProvider(SearchProvider):
                 # btdig pages results 0-based via ``p`` (its ``page`` query
                 # param is silently ignored) — live-verified 2026-07-05:
                 # ``p=1`` returns the next ~PAGE_SIZE results after ``p=0``.
-                params={"q": query, "p": page},
+                params={"q": query, "p": page, "order": _DEFAULT_ORDER},
                 timeout=timeout,
                 headers={"User-Agent": _USER_AGENT},
             )
