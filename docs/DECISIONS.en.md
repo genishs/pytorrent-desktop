@@ -67,6 +67,17 @@ English; commit messages are Korean-first.
 **Why:** Owner preference.
 **Reversible:** Yes. **(PM default, AFK)**
 
+## D8 — Search is usable only behind an explicit legal-consent gate (experimental)
+**Decision:** btdig-style search is off by default, and before use the user must be
+informed that (1) using it may be legally problematic, (2) it may **violate the license
+of the downloaded software/content**, and (3) **all responsibility is theirs** — and
+must explicitly agree via a checkbox + Agree. Until accepted, search and add-to-download
+are blocked. Consent is stored in `SearchSettings.consent_accepted` (not re-prompted),
+and a legal-notice banner is always shown in the search UI.
+**Why:** Search is a legally sensitive experimental feature (owner's directive). Forcing
+informed, responsible consent before use makes the risk explicit to the user.
+**Reversible:** Yes (gate/settings adjustable). As an experimental feature it lives on develop only.
+
 ## Queued for the owner (revisit on return, non-blocking)
 - Whether the kill switch should offer an "anonymous DHT over proxy (UDP-associate)"
   advanced mode vs the safe tracker+PEX default (D1). Default ships; toggle is a

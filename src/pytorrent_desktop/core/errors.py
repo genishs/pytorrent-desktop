@@ -63,3 +63,22 @@ class ProxyConfigError(EngineError):
     §8's error-handling table) when ``ProxyConfig.host`` is empty or
     ``ProxyConfig.port`` is out of range.
     """
+
+
+class SearchError(EngineError):
+    """EXPERIMENTAL/ALPHA (v0.5.1a, docs/ARCHITECTURE.md §9, docs/SCOPE.md).
+
+    Raised by a ``core/search/*`` :class:`~pytorrent_desktop.core.search.base.SearchProvider`
+    when a query fails — network error (timeout, connection refused, non-2xx
+    response) or a result page that could not be parsed. Every failure mode a
+    provider can hit must be wrapped in this single type rather than letting a
+    raw ``requests`` or ``bs4`` exception escape, so ``ui/`` (the experimental
+    search dialog) can catch one type and show a graceful inline message
+    instead of crashing.
+
+    Not raised by :class:`TorrentEngine` itself — search providers are a
+    separate, optional, user-activated subsystem (§9) — but subclassing
+    :class:`EngineError` lets any existing ``except EngineError`` call site
+    keep working unchanged if a search failure ever needs to surface through
+    the same generic-dialog path.
+    """

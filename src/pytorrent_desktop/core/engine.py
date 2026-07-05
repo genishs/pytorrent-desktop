@@ -712,6 +712,85 @@ class TorrentEngine:
         """
         return "enabled" if self._proxy_config is not None else "disabled"
 
+    # -- DHT peer probe (search-result detail view, v0.5.1a EXPERIMENTAL/ALPHA) --
+
+    def probe_dht_peers(self, info_hash: str, timeout: float = 10.0) -> int | None:
+        """Best-effort, real-time "how many peers does DHT know about this
+        info-hash right now" probe for the search-result detail dialog's
+        "DHT에서 피어 확인" button.
+
+        Fires ``session.dht_get_peers(sha1_hash)`` and blocks (via the same
+        ``wait_for_alert``/``pop_alerts`` drain shape as :meth:`_blocking_flush`)
+        up to ``timeout`` seconds, collecting every ``dht_get_peers_reply_alert``
+        for this info-hash — a DHT lookup is answered by multiple nodes over
+        the lookup's lifetime, so the *maximum* peer count seen across all
+        replies (rather than just the first) is returned. libtorrent 2.0.13
+        API verified directly (docs/ARCHITECTURE.md §9): ``session.dht_get_peers``
+        takes an ``lt.sha1_hash`` (raw 20 bytes, not the 40-char hex string —
+        ``lt.sha1_hash("aa"*20)`` would treat each character as one raw byte,
+        which is why this decodes ``info_hash`` with ``bytes.fromhex`` first).
+
+        Never raises: this is an optional, best-effort probe the user
+        explicitly opts into from the detail dialog, not a control call the
+        rest of the app depends on. Returns ``None`` (meaning "확인 불가" in
+        the UI) when the session is closed, DHT is currently disabled (off by
+        default, or turned off by the privacy kill switch — checked live via
+        ``get_settings()`` rather than a cached flag, since
+        :meth:`configure_privacy` can flip it at runtime), ``info_hash`` isn't
+        a valid hex hash, or nothing came back before the timeout.
+
+        **Verification limit (documented, not silently glossed over):** a
+        real, non-``None`` peer count can only ever come back against a live
+        DHT with real peers — not something a headless/offline test can
+        produce. Tests exercise this method's control flow (disabled-DHT
+        short-circuit, invalid-hash short-circuit, timeout-without-a-reply
+        behavior, and alert-classification via a fake session/alert, mirroring
+        :meth:`_blocking_flush`'s own test pattern) rather than a real reply.
+        """
+        if self._closed:
+            return None
+        try:
+            if not self._session.get_settings().get("enable_dht", False):
+                return None
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.warning("Could not read DHT settings for peer probe: %s", exc)
+            return None
+
+        try:
+            target = lt.sha1_hash(bytes.fromhex(info_hash))
+        except (ValueError, TypeError):
+            return None
+
+        try:
+            self._session.dht_get_peers(target)
+        except Exception as exc:  # noqa: BLE001 - never let a probe crash the app
+            _log.warning("dht_get_peers request failed: %s", exc)
+            return None
+
+        best: int | None = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._session.wait_for_alert(200)  # ms; blocks up to the next alert batch
+            for alert in self._session.pop_alerts():
+                count = self._process_dht_peers_alert(alert, target)
+                if count is not None:
+                    best = count if best is None else max(best, count)
+        return best
+
+    @staticmethod
+    def _process_dht_peers_alert(alert: object, target: lt.sha1_hash) -> int | None:
+        """Classify one alert for :meth:`probe_dht_peers`'s drain loop.
+
+        Split out (mirroring :meth:`_process_resume_alert`) so tests can
+        monkeypatch this one small classification step with fake sentinels —
+        ``lt.dht_get_peers_reply_alert`` is a native-only type and can't be
+        constructed directly from Python, the same constraint documented on
+        :class:`_FakeAlertSession` in ``tests/test_engine.py``.
+        """
+        if isinstance(alert, lt.dht_get_peers_reply_alert) and alert.info_hash == target:
+            return alert.num_peers()
+        return None
+
     def set_listen_port(self, port: int) -> None:
         """Change the listening port at runtime (docs/UX-SPEC.md §4 "리스닝 포트").
 
