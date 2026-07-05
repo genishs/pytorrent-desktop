@@ -560,6 +560,126 @@ def test_set_listen_port_out_of_range_raises(tmp_path: Path) -> None:
         engine.shutdown()
 
 
+# -- DHT peer probe (search-result detail view, v0.5.1a EXPERIMENTAL/ALPHA) --
+
+
+class _FakeDhtSession:
+    """Stand-in for ``lt.session`` inside :meth:`TorrentEngine.probe_dht_peers`.
+
+    Mirrors ``_FakeAlertSession`` above (same rationale: ``lt.dht_get_peers_reply_alert``
+    is a native-only type that can't be constructed from Python), but also
+    carries ``get_settings()``/``dht_get_peers()`` so the whole method's flow
+    -- not just its drain loop -- can be exercised without a live DHT.
+    """
+
+    def __init__(self, batches: list[list[object]], *, enable_dht: bool = True) -> None:
+        self._batches = iter(batches)
+        self._enable_dht = enable_dht
+        self.dht_get_peers_calls: list[object] = []
+
+    def get_settings(self) -> dict[str, object]:
+        return {"enable_dht": self._enable_dht}
+
+    def dht_get_peers(self, target: object) -> None:
+        self.dht_get_peers_calls.append(target)
+
+    def wait_for_alert(self, timeout_ms: int) -> None:
+        return None
+
+    def pop_alerts(self) -> list[object]:
+        return next(self._batches, [])
+
+
+def test_probe_dht_peers_returns_none_when_dht_disabled(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, enable_dht=False)
+    try:
+        start = time.monotonic()
+        result = engine.probe_dht_peers(_BASE_HASH, timeout=5.0)
+        elapsed = time.monotonic() - start
+
+        assert result is None
+        assert elapsed < 1.0  # short-circuited, never entered the drain loop
+    finally:
+        engine.shutdown()
+
+
+def test_probe_dht_peers_returns_none_for_invalid_info_hash(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    try:
+        assert engine.probe_dht_peers("not-a-valid-hex-hash", timeout=5.0) is None
+    finally:
+        engine.shutdown()
+
+
+def test_probe_dht_peers_gives_up_at_the_timeout_when_nothing_arrives(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    real_session = engine._session
+    try:
+        engine._session = _FakeDhtSession([])  # never produces any alerts
+
+        start = time.monotonic()
+        result = engine.probe_dht_peers(_BASE_HASH, timeout=0.3)
+        elapsed = time.monotonic() - start
+
+        assert result is None
+        assert elapsed >= 0.3
+    finally:
+        engine._session = real_session
+        engine.shutdown()
+
+
+def test_probe_dht_peers_returns_the_max_count_across_multiple_replies(tmp_path: Path) -> None:
+    """A DHT lookup is answered by multiple nodes over its lifetime; the
+    probe should report the highest peer count seen, not just the first."""
+    engine = _engine(tmp_path)
+    real_session = engine._session
+    try:
+        sentinel_low = object()
+        sentinel_high = object()
+        sentinel_unrelated = object()
+
+        def fake_process(alert: object, target: object) -> int | None:
+            if alert is sentinel_low:
+                return 3
+            if alert is sentinel_high:
+                return 17
+            return None
+
+        engine._process_dht_peers_alert = fake_process  # type: ignore[method-assign]
+        engine._session = _FakeDhtSession(
+            [[sentinel_low, sentinel_unrelated], [sentinel_high]]
+        )
+
+        result = engine.probe_dht_peers(_BASE_HASH, timeout=0.3)
+
+        assert result == 17
+    finally:
+        engine._session = real_session
+        engine.shutdown()
+
+
+def test_probe_dht_peers_requests_the_correct_target_hash(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    real_session = engine._session
+    try:
+        fake_session = _FakeDhtSession([])
+        engine._session = fake_session
+
+        engine.probe_dht_peers(_BASE_HASH, timeout=0.1)
+
+        assert len(fake_session.dht_get_peers_calls) == 1
+        assert str(fake_session.dht_get_peers_calls[0]) == _BASE_HASH
+    finally:
+        engine._session = real_session
+        engine.shutdown()
+
+
+def test_probe_dht_peers_on_closed_engine_returns_none(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine.shutdown()
+    assert engine.probe_dht_peers(_BASE_HASH, timeout=1.0) is None
+
+
 def test_blocking_flush_gives_up_at_the_timeout_when_nothing_arrives(tmp_path: Path) -> None:
     """If no alert ever arrives, the drain loop must give up at the timeout
     (not hang forever) and report zero saved."""

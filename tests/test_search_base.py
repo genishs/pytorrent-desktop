@@ -63,6 +63,38 @@ def test_search_result_allows_none_for_unknown_optional_fields() -> None:
     assert result.leechers is None
 
 
+def test_search_result_extended_fields_default_to_none() -> None:
+    """num_files/age/files/info_hash are trailing optional fields (added for
+    the result-list/detail UX) so any existing 6-positional-arg construction
+    of this dataclass keeps working unchanged."""
+    result = SearchResult(
+        "example.iso", None, None, None, "magnet:?xt=urn:btih:" + "a" * 40, "fake"
+    )
+    assert result.num_files is None
+    assert result.age is None
+    assert result.files is None
+    assert result.info_hash is None
+
+
+def test_search_result_extended_fields_carry_the_given_values() -> None:
+    result = SearchResult(
+        title="example.iso",
+        size_bytes=1024,
+        seeders=None,
+        leechers=None,
+        magnet="magnet:?xt=urn:btih:" + "a" * 40,
+        source="fake",
+        num_files=12,
+        age="found 2 months ago",
+        files=["a.txt", "b.txt"],
+        info_hash="a" * 40,
+    )
+    assert result.num_files == 12
+    assert result.age == "found 2 months ago"
+    assert result.files == ["a.txt", "b.txt"]
+    assert result.info_hash == "a" * 40
+
+
 def test_provider_is_abstract_without_search_implemented() -> None:
     with pytest.raises(TypeError):
 

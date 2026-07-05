@@ -28,6 +28,23 @@ class SearchResult:
     not track live peer counts, so it always reports ``seeders``/``leechers``
     as ``None``. The UI renders ``None`` as ``"-"`` rather than a misleading
     ``0``.
+
+    ``num_files``/``age``/``files``/``info_hash`` were added for the search
+    result list/detail UX (result-list liveliness signal + a double-click
+    detail view): all four are optional trailing fields, defaulted to
+    ``None`` so any existing positional-argument construction of this
+    dataclass keeps working unchanged.
+
+    - ``num_files``: file count reported by the provider (btdig's
+      ``.torrent_files``), or ``None`` if not reported.
+    - ``age``: how long ago the provider last saw this torrent — btdig's
+      ``.torrent_age`` (kept as the provider's original text, e.g. ``"found
+      2 months ago"``), a rough proxy for "is a seed still likely alive".
+    - ``files``: a preview of the file list inside the torrent (btdig's
+      ``.torrent_excerpt``), as a list of preview lines, a single blob of
+      text, or ``None`` if the provider didn't return one.
+    - ``info_hash``: the torrent's info-hash, parsed from ``magnet``'s
+      ``xt=urn:bt(ih|mh):...`` parameter when possible.
     """
 
     title: str
@@ -36,6 +53,10 @@ class SearchResult:
     leechers: int | None
     magnet: str
     source: str
+    num_files: int | None = None
+    age: str | None = None
+    files: list[str] | str | None = None
+    info_hash: str | None = None
 
 
 class SearchProvider(ABC):

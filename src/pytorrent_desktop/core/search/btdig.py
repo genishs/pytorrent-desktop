@@ -12,11 +12,14 @@ docs/SCOPE.md's explicit constraints for this provider:
     partial/garbage result list.
 
 Alpha-quality caveat (documented, not hidden): btdig's live page markup was
-not available to verify against, since docs/SCOPE.md forbids live network
-access during development/CI. ``_parse_results`` below is written against a
-documented, plausible result-row shape and is only exercised against the
-saved HTML fixtures in ``tests/fixtures/``. The CSS selectors here should be
-revisited against the real site once this ships.
+originally not available to verify against, since docs/SCOPE.md forbids live
+network access during development/CI, so ``_parse_results`` was first written
+against a documented, plausible result-row shape. The magnet-anchor location
+and the ``.torrent_files``/``.torrent_age``/``.torrent_excerpt`` fields below
+were since live-verified (2026-07-05, one-off manual fetch outside the test
+run) and captured into ``tests/fixtures/btdig_results_real.html`` — every
+test still only ever exercises the saved HTML fixtures in ``tests/fixtures/``,
+never a live request (docs/SCOPE.md's hard requirement).
 """
 
 from __future__ import annotations
@@ -41,6 +44,10 @@ _USER_AGENT = (
 )
 
 _SIZE_PATTERN = re.compile(r"([\d.]+)\s*([A-Za-z]+)")
+# btdig's magnet is either urn:btih (v1) or urn:btmh (v2/hybrid); both are
+# hex-ish identifiers we just need to lift out verbatim (docs/DECISIONS.md D5).
+_INFO_HASH_PATTERN = re.compile(r"urn:bt(?:ih|mh):([0-9A-Za-z]+)", re.IGNORECASE)
+_WHITESPACE_RUN = re.compile(r"\s+")
 _SIZE_UNITS = {
     "B": 1,
     "KB": 1024,
@@ -84,6 +91,52 @@ def _title_from_magnet(magnet: str) -> str:
     query = parse_qs(urlparse(magnet).query)
     names = query.get("dn")
     return names[0] if names else "(제목 없음 / untitled)"
+
+
+def _info_hash_from_magnet(magnet: str) -> str | None:
+    """Pull the ``xt=urn:bt(ih|mh):HASH`` identifier out of a magnet URI."""
+    match = _INFO_HASH_PATTERN.search(magnet)
+    return match.group(1) if match else None
+
+
+def _clean_text(el) -> str:
+    """``get_text()`` with a space separator, whitespace-collapsed.
+
+    btdig wraps the matched search term in ``<b>...</b>`` inside
+    ``.torrent_name`` (live-verified 2026-07-05, e.g. ``<a><b>Ubuntu</b>
+    MATE ISO Archive (2025)</a>``). A plain ``get_text(strip=True)`` strips
+    each text node individually before concatenating them, which silently
+    swallows the space between the bolded term and the rest of the title
+    (``"UbuntuMATE ISO..."``). Using a space separator and then collapsing
+    whitespace runs keeps the title readable regardless of where btdig
+    happens to split it with markup.
+    """
+    if el is None:
+        return ""
+    return _WHITESPACE_RUN.sub(" ", el.get_text(separator=" ")).strip()
+
+
+def _parse_excerpt_lines(excerpt_el) -> list[str] | None:
+    """Turn btdig's ``.torrent_excerpt`` file-tree preview into a flat list
+    of one string per row (folder names, file names + size, and the
+    "N hidden files" summary row), or ``None`` if there is no excerpt.
+
+    btdig separates each row with a bare ``<br>`` inside a single
+    ``display:table`` div rather than one element per row, so rows are
+    recovered by replacing every ``<br>`` with a newline and splitting the
+    resulting text on it — simpler and more robust than reconstructing
+    "which size ``<span>`` belongs to which file ``<div>``" from sibling
+    relationships.
+    """
+    if excerpt_el is None:
+        return None
+    for br in excerpt_el.find_all("br"):
+        br.replace_with("\n")
+    lines = [
+        _WHITESPACE_RUN.sub(" ", line).strip() for line in excerpt_el.get_text(" ").split("\n")
+    ]
+    lines = [line for line in lines if line]
+    return lines or None
 
 
 class BtdigProvider(SearchProvider):
@@ -152,11 +205,14 @@ class BtdigProvider(SearchProvider):
             if not magnet.startswith("magnet:"):
                 continue
             name_el = row.select_one(".torrent_name a")
-            title = (name_el.get_text(strip=True) if name_el else "") or _title_from_magnet(magnet)
+            title = _clean_text(name_el) or _title_from_magnet(magnet)
 
             size_el = row.select_one(".torrent_size")
             seeders_el = row.select_one(".torrent_seeders")
             leechers_el = row.select_one(".torrent_leechers")
+            files_count_el = row.select_one(".torrent_files")
+            age_el = row.select_one(".torrent_age")
+            excerpt_el = row.select_one(".torrent_excerpt")
 
             results.append(
                 SearchResult(
@@ -166,6 +222,12 @@ class BtdigProvider(SearchProvider):
                     leechers=_parse_optional_int(leechers_el.get_text() if leechers_el else None),
                     magnet=magnet,
                     source=self.name,
+                    num_files=_parse_optional_int(
+                        files_count_el.get_text() if files_count_el else None
+                    ),
+                    age=_clean_text(age_el) or None,
+                    files=_parse_excerpt_lines(excerpt_el),
+                    info_hash=_info_hash_from_magnet(magnet),
                 )
             )
         return results

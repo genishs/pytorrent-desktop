@@ -33,7 +33,9 @@ class FakeEngine:
         self.listen_port_calls: list[int] = []
         self.shutdown_calls = 0
         self.add_magnet_calls: list[tuple[str, str]] = []
+        self.probe_dht_peers_calls: list[tuple[str, float]] = []
         self._privacy_status = "disabled"
+        self._probe_dht_peers_result: int | None = None
 
     def snapshot(self) -> list[TorrentStatus]:
         return list(self._torrents)
@@ -82,6 +84,10 @@ class FakeEngine:
 
     def shutdown(self, timeout_s: float = 10.0) -> None:
         self.shutdown_calls += 1
+
+    def probe_dht_peers(self, info_hash: str, timeout: float = 10.0) -> int | None:
+        self.probe_dht_peers_calls.append((info_hash, timeout))
+        return self._probe_dht_peers_result
 
     def set_finished(self, info_hash: str, finished: bool) -> None:
         """Test helper: flip a torrent's ``is_finished`` in place."""
@@ -562,8 +568,18 @@ def _make_fake_search_dialog(result, *, magnet=None, save_path=None):
         DialogCode = QDialog.DialogCode
         constructed_with: list = []
 
-        def __init__(self, provider, *, timeout=10.0, default_save_path="", parent=None) -> None:
-            type(self).constructed_with.append((provider, timeout, default_save_path))
+        def __init__(
+            self,
+            provider,
+            *,
+            timeout=10.0,
+            default_save_path="",
+            probe_dht_peers_fn=None,
+            parent=None,
+        ) -> None:
+            type(self).constructed_with.append(
+                (provider, timeout, default_save_path, probe_dht_peers_fn)
+            )
 
         def exec(self):
             return result
@@ -658,6 +674,28 @@ def test_open_search_dialog_proceeds_after_consent_accepted(qtbot, monkeypatch, 
     # Consent persists both in memory and on disk, so it isn't asked again.
     assert window._settings.search.consent_accepted is True
     assert store.load().search.consent_accepted is True
+
+
+def test_open_search_dialog_forwards_the_probe_dht_peers_seam(qtbot, monkeypatch):
+    """MainWindow must hand SearchDialog a callable wrapping
+    TorrentEngine.probe_dht_peers (docs/DECISIONS.md D3's injected-seam
+    pattern) — never let SearchDialog/SearchResultDetailDialog import or call
+    TorrentEngine directly."""
+    engine = FakeEngine()
+    settings = AppSettings(search=SearchSettings(enabled=True, consent_accepted=True))
+    window = MainWindow(engine, settings=settings)
+    qtbot.addWidget(window)
+
+    fake_search_dialog = _make_fake_search_dialog(QDialog.DialogCode.Rejected)
+    monkeypatch.setattr(main_window_module, "SearchDialog", fake_search_dialog)
+
+    window._open_search_dialog()
+
+    assert len(fake_search_dialog.constructed_with) == 1
+    probe_fn = fake_search_dialog.constructed_with[0][3]
+    assert probe_fn == engine.probe_dht_peers
+    assert probe_fn("a" * 40, 5.0) is None
+    assert engine.probe_dht_peers_calls == [("a" * 40, 5.0)]
 
 
 def test_open_search_dialog_skips_consent_gate_once_already_accepted(qtbot, monkeypatch):

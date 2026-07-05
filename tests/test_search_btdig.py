@@ -201,3 +201,77 @@ def test_search_parses_btdig_real_structure_magnet_in_separate_anchor():
     assert results[0].magnet.startswith("magnet:?xt=urn:btih:aaaaaaaaaaaa")
     assert results[0].size_bytes == _parse_size_to_bytes("5.7 GB")
     assert results[1].magnet.startswith("magnet:?xt=urn:btih:bbbbbbbbbbbb")
+
+
+# -- extended fields for the search-result list/detail UX (2026-07 UX pass) ---
+
+
+def test_search_parses_title_split_by_btdigs_bold_highlight_span():
+    """Regression: btdig wraps the matched query term in <b> inside
+    .torrent_name (live-verified), e.g. "<a><b>Ubuntu</b> 24.04 ...</a>". A
+    naive get_text(strip=True) drops the space between the bolded fragment
+    and the rest of the title, producing "Ubuntu24.04..." — the title must
+    come out with the space intact.
+    """
+    html = (_FIXTURES_DIR / "btdig_results_real.html").read_text(encoding="utf-8")
+    provider = BtdigProvider(session=_FakeSession(_FakeResponse(html)))
+    results = provider.search("ubuntu")
+    assert results[0].title == "Ubuntu 24.04 Desktop amd64"
+
+
+def test_search_parses_num_files_from_torrent_files_span():
+    html = (_FIXTURES_DIR / "btdig_results_real.html").read_text(encoding="utf-8")
+    provider = BtdigProvider(session=_FakeSession(_FakeResponse(html)))
+    results = provider.search("ubuntu")
+    assert results[0].num_files == 396
+
+
+def test_search_parses_age_from_torrent_age_span():
+    html = (_FIXTURES_DIR / "btdig_results_real.html").read_text(encoding="utf-8")
+    provider = BtdigProvider(session=_FakeSession(_FakeResponse(html)))
+    results = provider.search("ubuntu")
+    assert results[0].age == "found 2 months ago"
+
+
+def test_search_parses_info_hash_from_the_magnet_xt_parameter():
+    html = (_FIXTURES_DIR / "btdig_results_real.html").read_text(encoding="utf-8")
+    provider = BtdigProvider(session=_FakeSession(_FakeResponse(html)))
+    results = provider.search("ubuntu")
+    assert results[0].info_hash == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert results[1].info_hash == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+
+def test_search_parses_excerpt_into_a_flat_list_of_preview_lines():
+    html = (_FIXTURES_DIR / "btdig_results_real.html").read_text(encoding="utf-8")
+    provider = BtdigProvider(session=_FakeSession(_FakeResponse(html)))
+    results = provider.search("ubuntu")
+    files = results[0].files
+    assert isinstance(files, list)
+    assert files[0] == "Ubuntu 24.04 Desktop amd64"  # folder row, highlight preserved
+    assert "ubuntu -24.04-desktop-amd64.iso 5.7 GB" in files
+    assert "2 hidden files 1.2 MB" in files
+
+
+def test_search_missing_optional_fields_are_gracefully_none():
+    """Row 2 in the real-structure fixture has no .torrent_files/.torrent_age/
+    .torrent_excerpt at all — the provider must report None, not crash or
+    fabricate a value, for every field it doesn't have (§9's "graceful")."""
+    html = (_FIXTURES_DIR / "btdig_results_real.html").read_text(encoding="utf-8")
+    provider = BtdigProvider(session=_FakeSession(_FakeResponse(html)))
+    results = provider.search("ubuntu")
+    second = results[1]
+    assert second.num_files is None
+    assert second.age is None
+    assert second.files is None
+    assert second.info_hash == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+
+def test_search_extended_fields_are_none_on_the_older_plain_fixture():
+    """The pre-existing btdig_results.html fixture has no .torrent_age/
+    .torrent_excerpt at all — must not error, just report None for those."""
+    session = _FakeSession(_FakeResponse(_fixture("btdig_results.html")))
+    provider = BtdigProvider(session=session)
+    results = provider.search("ubuntu")
+    assert results[0].age is None
+    assert results[0].files is None
+    assert results[0].info_hash == "0123456789abcdef0123456789abcdef01234567"

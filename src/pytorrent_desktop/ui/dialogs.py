@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QRadioButton,
     QTableWidget,
@@ -812,7 +813,12 @@ class SearchConsentDialog(QDialog):
 
 # -- Search dialog (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------------------
 
-_SEARCH_RESULT_COLUMNS = ("제목", "크기", "시더", "출처")
+# 파일수/발견 added for the result-list UX pass (2026-07): 발견(age) is a
+# rough "is a seed still likely alive" signal — more recently found by btdig's
+# DHT crawl suggests a more likely-active swarm, though it's not a live peer
+# count (docs/SCOPE.md: btdig itself never reports one).
+_SEARCH_RESULT_COLUMNS = ("제목", "크기", "파일수", "발견", "시더", "출처")
+_COL_TITLE, _COL_SIZE, _COL_FILES, _COL_AGE, _COL_SEEDERS, _COL_SOURCE = range(6)
 
 
 def _format_optional_size(size_bytes: int | None) -> str:
@@ -821,6 +827,20 @@ def _format_optional_size(size_bytes: int | None) -> str:
 
 def _format_optional_count(value: int | None) -> str:
     return str(value) if value is not None else "-"
+
+
+def _format_optional_text(value: str | None) -> str:
+    return value if value else "-"
+
+
+def _files_preview_lines(files: list[str] | str | None) -> list[str]:
+    """Normalize :attr:`SearchResult.files` (list, blob string, or None) into
+    a flat list of preview lines for display."""
+    if files is None:
+        return []
+    if isinstance(files, str):
+        return [line.strip() for line in files.splitlines() if line.strip()]
+    return list(files)
 
 
 class SearchDialog(QDialog):
@@ -853,6 +873,7 @@ class SearchDialog(QDialog):
         *,
         timeout: float = 10.0,
         default_save_path: str = "",
+        probe_dht_peers_fn: Callable[[str, float], int | None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -862,6 +883,11 @@ class SearchDialog(QDialog):
         self._provider = provider
         self._timeout = timeout
         self._default_save_path = default_save_path
+        # Injected seam (mirrors MainWindow's own system_shutdown_fn pattern,
+        # docs/DECISIONS.md D3): this dialog never imports/calls TorrentEngine
+        # itself, only invokes whatever callable MainWindow wired up around
+        # TorrentEngine.probe_dht_peers. Forwarded as-is to the detail dialog.
+        self._probe_dht_peers_fn = probe_dht_peers_fn
         self._results: list[SearchResult] = []
         self._selected_magnet: str | None = None
         self._selected_save_path: str | None = None
@@ -891,6 +917,9 @@ class SearchDialog(QDialog):
         self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.results_table.horizontalHeader().setStretchLastSection(True)
         self.results_table.itemSelectionChanged.connect(self._update_download_enabled)
+        # 더블클릭 -> 상세보기 (제목만으로는 어떤 파일인지 구별하기 어렵다는
+        # 문제의 해결책): opens SearchResultDetailDialog for that row.
+        self.results_table.cellDoubleClicked.connect(self._open_detail_dialog)
 
         self._download_button = QPushButton("다운로드 추가", self)
         self._download_button.setProperty("variant", "primary")
@@ -934,14 +963,20 @@ class SearchDialog(QDialog):
     def _populate_results(self, results: list[SearchResult]) -> None:
         self.results_table.setRowCount(len(results))
         for row, result in enumerate(results):
-            self.results_table.setItem(row, 0, QTableWidgetItem(result.title))
+            self.results_table.setItem(row, _COL_TITLE, QTableWidgetItem(result.title))
             self.results_table.setItem(
-                row, 1, QTableWidgetItem(_format_optional_size(result.size_bytes))
+                row, _COL_SIZE, QTableWidgetItem(_format_optional_size(result.size_bytes))
             )
             self.results_table.setItem(
-                row, 2, QTableWidgetItem(_format_optional_count(result.seeders))
+                row, _COL_FILES, QTableWidgetItem(_format_optional_count(result.num_files))
             )
-            self.results_table.setItem(row, 3, QTableWidgetItem(result.source))
+            self.results_table.setItem(
+                row, _COL_AGE, QTableWidgetItem(_format_optional_text(result.age))
+            )
+            self.results_table.setItem(
+                row, _COL_SEEDERS, QTableWidgetItem(_format_optional_count(result.seeders))
+            )
+            self.results_table.setItem(row, _COL_SOURCE, QTableWidgetItem(result.source))
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -971,6 +1006,25 @@ class SearchDialog(QDialog):
         self._selected_save_path = directory
         self.accept()
 
+    # -- detail view (double-click a row) --------------------------------------
+
+    def _open_detail_dialog(self, row: int, _column: int) -> None:
+        """Double-click a result row -> full detail (title/size/files/age/
+        infohash/magnet/file-preview + optional DHT peer probe). Addresses
+        the "title alone doesn't say which file this is, or whether seeds
+        are still alive" complaint the result list itself can only hint at
+        with the 파일수/발견 columns.
+        """
+        if row >= len(self._results):
+            return
+        dialog = SearchResultDetailDialog(
+            self._results[row],
+            probe_dht_peers_fn=self._probe_dht_peers_fn,
+            probe_timeout=self._timeout,
+            parent=self,
+        )
+        dialog.exec()
+
     # -- result accessors (read after exec() returns Accepted) ---------------
 
     def selected_magnet(self) -> str | None:
@@ -982,3 +1036,121 @@ class SearchDialog(QDialog):
     def results_count(self) -> int:
         """Test helper: how many results are currently loaded."""
         return len(self._results)
+
+
+# -- Search-result detail dialog (v0.5.1a, EXPERIMENTAL/ALPHA) ----------------
+
+
+class SearchResultDetailDialog(QDialog):
+    """Full detail view for one :class:`SearchResult`, opened by double-
+    clicking a row in :class:`SearchDialog`'s results table.
+
+    Read-only: this dialog only displays information and offers a magnet
+    copy button + an optional live DHT peer probe — it never itself adds
+    anything to downloads (that stays on :class:`SearchDialog`'s "다운로드
+    추가" flow) and, like every other dialog in this module, never calls into
+    :class:`~pytorrent_desktop.core.engine.TorrentEngine` directly. The
+    "DHT에서 피어 확인" button instead invokes ``probe_dht_peers_fn``, an
+    injected callable MainWindow wires up around
+    ``TorrentEngine.probe_dht_peers`` — the same seam pattern as
+    ``MainWindow``'s own ``system_shutdown_fn`` (docs/DECISIONS.md D3).
+    ``probe_dht_peers_fn=None`` (e.g. no engine wired up, as in most tests)
+    disables the button rather than raising.
+    """
+
+    def __init__(
+        self,
+        result: SearchResult,
+        *,
+        probe_dht_peers_fn: Callable[[str, float], int | None] | None = None,
+        probe_timeout: float = 10.0,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("검색 결과 상세")
+        self.setModal(True)
+        self.resize(520, 480)
+        self._result = result
+        self._probe_dht_peers_fn = probe_dht_peers_fn
+        self._probe_timeout = probe_timeout
+
+        title_label = QLabel(result.title, self)
+        title_label.setWordWrap(True)
+        title_label.setProperty("role", "title")
+
+        form = QFormLayout()
+        form.addRow("크기:", QLabel(_format_optional_size(result.size_bytes), self))
+        form.addRow("파일 수:", QLabel(_format_optional_count(result.num_files), self))
+        form.addRow("발견:", QLabel(_format_optional_text(result.age), self))
+        form.addRow("출처:", QLabel(result.source, self))
+
+        self.info_hash_label = QLabel(_format_optional_text(result.info_hash), self)
+        self.info_hash_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        form.addRow("Info Hash:", self.info_hash_label)
+
+        self.magnet_edit = QLineEdit(result.magnet, self)
+        self.magnet_edit.setReadOnly(True)
+        copy_magnet_button = QPushButton("복사", self)
+        copy_magnet_button.clicked.connect(self._copy_magnet)
+        magnet_row = QHBoxLayout()
+        magnet_row.addWidget(self.magnet_edit)
+        magnet_row.addWidget(copy_magnet_button)
+        form.addRow("Magnet:", magnet_row)
+
+        files_group = QGroupBox("파일 미리보기", self)
+        files_layout = QVBoxLayout(files_group)
+        self.files_list = QListWidget(files_group)
+        preview_lines = _files_preview_lines(result.files)
+        self.files_list.addItems(preview_lines)
+        files_layout.addWidget(self.files_list)
+        if not preview_lines:
+            files_layout.addWidget(QLabel("파일 미리보기 정보가 없습니다", files_group))
+
+        dht_row = QHBoxLayout()
+        self.probe_button = QPushButton("DHT에서 피어 확인", self)
+        self.probe_button.setEnabled(
+            bool(result.info_hash) and self._probe_dht_peers_fn is not None
+        )
+        self.probe_button.clicked.connect(self._probe_peers)
+        self.probe_result_label = QLabel("", self)
+        self.probe_result_label.setProperty("role", "hint")
+        dht_row.addWidget(self.probe_button)
+        dht_row.addWidget(self.probe_result_label, stretch=1)
+
+        self._buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, self)
+        self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("닫기")
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(title_label)
+        layout.addLayout(form)
+        layout.addWidget(files_group)
+        layout.addLayout(dht_row)
+        layout.addWidget(self._buttons)
+
+    # -- actions --------------------------------------------------------------
+
+    def _copy_magnet(self) -> None:
+        QGuiApplication.clipboard().setText(self._result.magnet)
+
+    def _probe_peers(self) -> None:
+        """Run the injected DHT probe seam and show its result inline.
+
+        Runs synchronously on the Qt main thread (blocking this modal dialog
+        for up to ``probe_timeout``, same trade-off documented on
+        :class:`SearchDialog`'s own synchronous search) — acceptable for this
+        experimental/alpha, explicitly user-triggered action.
+        """
+        info_hash = self._result.info_hash
+        if self._probe_dht_peers_fn is None or not info_hash:
+            self.probe_result_label.setText("확인 불가")
+            return
+        self.probe_result_label.setText("확인 중…")
+        try:
+            count = self._probe_dht_peers_fn(info_hash, self._probe_timeout)
+        except Exception:  # noqa: BLE001 - a probe failure must never crash the dialog
+            count = None
+        text = f"피어 {count}개 발견" if count is not None else "확인 불가"
+        self.probe_result_label.setText(text)

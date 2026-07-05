@@ -8,6 +8,7 @@ themselves (that's :class:`MainWindow`'s job).
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLabel, QPushButton
 
 from pytorrent_desktop.core.config import (
@@ -24,6 +25,7 @@ from pytorrent_desktop.ui.dialogs import (
     RemoveDialog,
     SearchConsentDialog,
     SearchDialog,
+    SearchResultDetailDialog,
     SettingsDialog,
     is_valid_magnet,
 )
@@ -543,12 +545,14 @@ def test_search_dialog_populates_results_table(qtbot):
     assert provider.queries == ["linux"]
     assert dialog.results_table.rowCount() == 2
     assert dialog.results_table.item(0, 0).text() == "Ubuntu ISO"
-    assert dialog.results_table.item(0, 2).text() == "5"  # seeders
-    assert dialog.results_table.item(0, 3).text() == "stub"  # source
+    assert dialog.results_table.item(0, 4).text() == "5"  # seeders
+    assert dialog.results_table.item(0, 5).text() == "stub"  # source
 
 
 def test_search_dialog_shows_dash_for_unknown_optional_fields(qtbot):
-    provider = _StubProvider([_make_result(size_bytes=None, seeders=None, leechers=None)])
+    provider = _StubProvider(
+        [_make_result(size_bytes=None, seeders=None, leechers=None, num_files=None, age=None)]
+    )
     dialog = SearchDialog(provider)
     qtbot.addWidget(dialog)
 
@@ -556,7 +560,23 @@ def test_search_dialog_shows_dash_for_unknown_optional_fields(qtbot):
     dialog._run_search()
 
     assert dialog.results_table.item(0, 1).text() == "-"  # size
-    assert dialog.results_table.item(0, 2).text() == "-"  # seeders
+    assert dialog.results_table.item(0, 2).text() == "-"  # files count
+    assert dialog.results_table.item(0, 3).text() == "-"  # age
+    assert dialog.results_table.item(0, 4).text() == "-"  # seeders
+
+
+def test_search_dialog_shows_num_files_and_age_columns(qtbot):
+    provider = _StubProvider(
+        [_make_result(num_files=42, age="found 2 months ago")]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert dialog.results_table.item(0, 2).text() == "42"
+    assert dialog.results_table.item(0, 3).text() == "found 2 months ago"
 
 
 def test_search_dialog_no_results_shows_status_message(qtbot):
@@ -624,4 +644,190 @@ def test_search_dialog_add_to_downloads_cancelled_save_path_stays_open(qtbot, mo
     dialog._add_selected_to_downloads()
 
     assert dialog.result() != QDialog.DialogCode.Accepted
-    assert dialog.selected_magnet() is None
+
+
+def test_search_dialog_double_click_row_opens_detail_dialog(qtbot, monkeypatch):
+    """Double-clicking a result row must open SearchResultDetailDialog for
+    that row — the fix for "제목만 보여 어떤 파일인지 구별이 어렵다"."""
+    provider = _StubProvider([_make_result(title="Ubuntu ISO")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    opened_with: list = []
+
+    class _FakeDetailDialog:
+        def __init__(self, result, **kwargs) -> None:
+            opened_with.append(result)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(
+        "pytorrent_desktop.ui.dialogs.SearchResultDetailDialog", _FakeDetailDialog
+    )
+
+    dialog._open_detail_dialog(0, 0)
+
+    assert len(opened_with) == 1
+    assert opened_with[0].title == "Ubuntu ISO"
+
+
+def test_search_dialog_double_click_out_of_range_row_is_a_noop(qtbot):
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._open_detail_dialog(5, 0)  # no row 5 -> must not raise/crash
+
+
+def test_search_dialog_forwards_probe_dht_peers_fn_to_detail_dialog(qtbot, monkeypatch):
+    provider = _StubProvider([_make_result()])
+    probe_calls: list = []
+    probe_fn = lambda info_hash, timeout: probe_calls.append((info_hash, timeout)) or 7  # noqa: E731
+    dialog = SearchDialog(provider, probe_dht_peers_fn=probe_fn)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    captured: list = []
+
+    class _FakeDetailDialog:
+        def __init__(self, result, *, probe_dht_peers_fn=None, probe_timeout=10.0, parent=None):
+            captured.append(probe_dht_peers_fn)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(
+        "pytorrent_desktop.ui.dialogs.SearchResultDetailDialog", _FakeDetailDialog
+    )
+
+    dialog._open_detail_dialog(0, 0)
+
+    assert captured == [probe_fn]
+
+
+# -- SearchResultDetailDialog (v0.5.1a, EXPERIMENTAL/ALPHA) -------------------
+
+
+def test_detail_dialog_shows_full_title_and_fields(qtbot):
+    result = _make_result(
+        title="Ubuntu 24.04 Desktop amd64",
+        size_bytes=int(5.7 * 1024**3),
+        num_files=396,
+        age="found 2 months ago",
+        info_hash="a" * 40,
+    )
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert any(
+        label.text() == "Ubuntu 24.04 Desktop amd64" for label in dialog.findChildren(QLabel)
+    )
+    assert dialog.info_hash_label.text() == "a" * 40
+    assert dialog.magnet_edit.text() == result.magnet
+
+
+def test_detail_dialog_shows_dash_for_missing_optional_fields(qtbot):
+    result = _make_result(num_files=None, age=None, info_hash=None)
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert dialog.info_hash_label.text() == "-"
+
+
+def test_detail_dialog_files_preview_populates_list(qtbot):
+    result = _make_result(files=["a.iso", "b.txt"])
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert dialog.files_list.count() == 2
+    assert dialog.files_list.item(0).text() == "a.iso"
+
+
+def test_detail_dialog_files_preview_accepts_blob_string(qtbot):
+    result = _make_result(files="a.iso\nb.txt\n")
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert dialog.files_list.count() == 2
+
+
+def test_detail_dialog_copy_magnet_button_copies_to_clipboard(qtbot):
+    magnet = "magnet:?xt=urn:btih:" + "c" * 40
+    result = _make_result(magnet=magnet)
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    copy_button = next(b for b in dialog.findChildren(QPushButton) if b.text() == "복사")
+    copy_button.click()
+
+    assert QGuiApplication.clipboard().text() == magnet
+
+
+def test_detail_dialog_probe_button_disabled_without_info_hash(qtbot):
+    result = _make_result(info_hash=None)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=lambda h, t: 5)
+    qtbot.addWidget(dialog)
+
+    assert not dialog.probe_button.isEnabled()
+
+
+def test_detail_dialog_probe_button_disabled_without_probe_fn(qtbot):
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=None)
+    qtbot.addWidget(dialog)
+
+    assert not dialog.probe_button.isEnabled()
+
+
+def test_detail_dialog_probe_button_shows_peer_count(qtbot):
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=lambda h, t: 12)
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()
+
+    assert "12" in dialog.probe_result_label.text()
+
+
+def test_detail_dialog_probe_button_shows_unavailable_when_probe_returns_none(qtbot):
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=lambda h, t: None)
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()
+
+    assert "확인 불가" in dialog.probe_result_label.text()
+
+
+def test_detail_dialog_probe_button_passes_info_hash_and_timeout(qtbot):
+    calls: list = []
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(
+        result, probe_dht_peers_fn=lambda h, t: calls.append((h, t)), probe_timeout=7.5
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()
+
+    assert calls == [("a" * 40, 7.5)]
+
+
+def test_detail_dialog_probe_button_survives_a_raising_probe_fn(qtbot):
+    """A probe failure must show '확인 불가', never crash the dialog."""
+
+    def _boom(info_hash, timeout):
+        raise RuntimeError("dht unreachable")
+
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=_boom)
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()  # must not raise
+
+    assert "확인 불가" in dialog.probe_result_label.text()

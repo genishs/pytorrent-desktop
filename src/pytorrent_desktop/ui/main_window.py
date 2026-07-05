@@ -396,6 +396,11 @@ class MainWindow(QMainWindow):
             provider,
             timeout=self._settings.search.timeout,
             default_save_path=self._default_save_path,
+            # Injected seam (docs/DECISIONS.md D3's pattern, same as
+            # system_shutdown_fn below): the search dialog's detail view
+            # never imports TorrentEngine itself, only calls whatever
+            # callable it's handed for the "DHT에서 피어 확인" button.
+            probe_dht_peers_fn=self._engine.probe_dht_peers,
             parent=self,
         )
         if dialog.exec() != SearchDialog.DialogCode.Accepted:
