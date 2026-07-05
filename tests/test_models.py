@@ -33,6 +33,8 @@ def make_status(**overrides) -> TorrentStatus:
         upload_rate=128_000,
         num_peers=14,
         num_seeds=3,
+        num_complete=-1,
+        num_incomplete=-1,
         state="downloading",
         is_paused=False,
         is_finished=False,
@@ -99,6 +101,74 @@ def test_state_label_maps_known_states():
 
 def test_state_label_falls_back_to_raw_state_for_unknown_values():
     assert state_label(make_status(state="something_new")) == "something_new"
+
+
+# -- downloading + zero rate -> "시더 없음" / "정체" (stalled/no-seeds) -----
+
+
+def test_state_label_no_connected_or_swarm_seeds_is_no_seeds():
+    status = make_status(
+        state="downloading", download_rate=0, num_seeds=0, num_complete=0, num_peers=5
+    )
+    assert state_label(status) == "시더 없음"
+
+
+def test_state_label_no_seeds_when_swarm_seed_count_unknown():
+    # num_complete == -1 is libtorrent's "no scrape info yet" sentinel, not
+    # "zero seeds" — but with zero *connected* seeds too, there's still
+    # nothing better to show than "시더 없음".
+    status = make_status(
+        state="downloading", download_rate=0, num_seeds=0, num_complete=-1, num_peers=0
+    )
+    assert state_label(status) == "시더 없음"
+
+
+def test_state_label_swarm_has_seeds_but_none_connected_is_still_no_seeds():
+    status = make_status(
+        state="downloading", download_rate=0, num_seeds=0, num_complete=0, num_peers=0
+    )
+    assert state_label(status) == "시더 없음"
+
+
+def test_state_label_peers_but_zero_rate_is_stalled():
+    status = make_status(
+        state="downloading", download_rate=0, num_seeds=2, num_complete=2, num_peers=5
+    )
+    assert state_label(status) == "정체"
+
+
+def test_state_label_stalled_when_swarm_seeds_known_positive_even_if_none_connected():
+    # Connected seeds is 0 but the swarm scrape says seeds exist elsewhere —
+    # treat as "정체" (stalled), not "시더 없음" (no seeds anywhere).
+    status = make_status(
+        state="downloading", download_rate=0, num_seeds=0, num_complete=3, num_peers=4
+    )
+    assert state_label(status) == "정체"
+
+
+def test_state_label_downloading_with_nonzero_rate_is_unaffected():
+    status = make_status(state="downloading", download_rate=1000, num_seeds=0, num_complete=0)
+    assert state_label(status) == "다운로드 중"
+
+
+def test_state_label_finished_progress_zero_rate_is_not_reclassified():
+    # is_finished True (e.g. a "downloading"-state snapshot that just hit
+    # 100%) must not be relabeled as stalled/no-seeds even with rate 0.
+    status = make_status(
+        state="downloading", download_rate=0, num_seeds=0, num_complete=0, is_finished=True
+    )
+    assert state_label(status) == "다운로드 중"
+
+
+def test_state_label_paused_takes_priority_over_no_seeds():
+    status = make_status(
+        state="downloading",
+        download_rate=0,
+        num_seeds=0,
+        num_complete=0,
+        is_paused=True,
+    )
+    assert state_label(status) == "일시정지"
 
 
 # -- TorrentTableModel --------------------------------------------------------

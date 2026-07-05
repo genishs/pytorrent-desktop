@@ -117,6 +117,15 @@ class TorrentStatus:
     upload_rate: int  # bytes/s
     num_peers: int
     num_seeds: int
+    # Swarm-wide (not just connected-to-us) counts, from the tracker/DHT
+    # scrape — verified libtorrent 2.0.13 ``torrent_status.num_complete`` /
+    # ``num_incomplete`` attributes. ``-1`` means "unknown" (no scrape info
+    # yet), which is libtorrent's own sentinel for these two fields — callers
+    # must not treat ``-1`` as "zero seeds in the swarm". Added so the UI can
+    # tell "no seeds connected yet, but some exist" apart from "genuinely no
+    # seeds anywhere" (docs/UX-SPEC.md §5.1 stalled/no-seeds refinement).
+    num_complete: int
+    num_incomplete: int
     state: str
     is_paused: bool
     is_finished: bool
@@ -537,6 +546,8 @@ class TorrentEngine:
                     upload_rate=s.upload_rate,
                     num_peers=s.num_peers,
                     num_seeds=s.num_seeds,
+                    num_complete=s.num_complete,
+                    num_incomplete=s.num_incomplete,
                     state=_STATE_LABELS.get(s.state, str(s.state)),
                     is_paused=bool(s.flags & lt.torrent_flags.paused),
                     is_finished=is_finished,

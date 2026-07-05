@@ -189,6 +189,8 @@ def test_snapshot_status_has_extended_fields(tmp_path: Path) -> None:
         assert isinstance(status.upload_rate, int)
         assert isinstance(status.num_peers, int)
         assert isinstance(status.num_seeds, int)
+        assert isinstance(status.num_complete, int)
+        assert isinstance(status.num_incomplete, int)
         assert isinstance(status.state, str)
         assert isinstance(status.is_paused, bool)
         assert isinstance(status.is_finished, bool)
