@@ -55,6 +55,12 @@ _STATE_DISPLAY_LABELS = {
     "seeding": "시딩 중",
 }
 
+# "다운로드 중"인데 속도가 0인 경우의 세분화 라벨 (사용자가 진행률/속도가 전혀
+# 안 움직여 "먹통"이라고 오해하는 것을 막기 위함 — 시더가 아예 없는 경우와,
+# 피어는 있으나 아무 데이터도 못 받는 "정체" 상태를 구분해서 보여준다).
+_LABEL_NO_SEEDS = "시더 없음"
+_LABEL_STALLED = "정체"
+
 
 def format_size(total_bytes: int) -> str:
     """Human-readable size (docs/UX-SPEC.md §1.3): B / KB / MB / GB.
@@ -87,16 +93,39 @@ def format_progress(progress: float) -> str:
     return f"{round(progress * 100)}%"
 
 
+def _has_no_seeds(status: TorrentStatus) -> bool:
+    """True if there is no known seed anywhere — connected or in the swarm.
+
+    ``num_seeds`` is peers-we're-connected-to; ``num_complete`` is the
+    tracker/DHT scrape's swarm-wide seed count, or ``-1`` if libtorrent
+    hasn't got scrape info yet (verified libtorrent 2.0.13 sentinel — *not*
+    "zero seeds"). When the swarm-wide count is unknown, connected-seed count
+    alone is the best signal available.
+    """
+    if status.num_seeds > 0:
+        return False
+    return status.num_complete <= 0
+
+
 def state_label(status: TorrentStatus) -> str:
     """Map a snapshot to its list-view state label per docs/UX-SPEC.md §5.1.
 
     Priority: error > paused > the underlying engine state (falling back to
     the raw engine string for any state this UI doesn't special-case yet).
+
+    Within "downloading", a zero download rate on an unfinished torrent is
+    further split into "시더 없음" (no seed connected or known in the swarm)
+    vs. "정체" (peers are there, but nothing is coming through) — otherwise a
+    seedless torrent just sits at "다운로드 중" with 0%/0 B/s forever, which
+    reads as the app being stuck rather than as "there's genuinely nobody to
+    download from yet".
     """
     if status.error:
         return "오류"
     if status.is_paused:
         return "일시정지"
+    if status.state == "downloading" and not status.is_finished and status.download_rate == 0:
+        return _LABEL_NO_SEEDS if _has_no_seeds(status) else _LABEL_STALLED
     return _STATE_DISPLAY_LABELS.get(status.state, status.state)
 
 

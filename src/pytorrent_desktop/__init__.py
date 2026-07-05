@@ -1,3 +1,3 @@
 """pytorrent-desktop: a Windows desktop BitTorrent client on libtorrent + PySide6."""
 
-__version__ = "0.5.1a"
+__version__ = "0.5.3"

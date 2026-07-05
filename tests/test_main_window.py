@@ -111,6 +111,8 @@ def make_status(**overrides) -> TorrentStatus:
         upload_rate=50,
         num_peers=3,
         num_seeds=1,
+        num_complete=-1,
+        num_incomplete=-1,
         state="downloading",
         is_paused=False,
         is_finished=False,

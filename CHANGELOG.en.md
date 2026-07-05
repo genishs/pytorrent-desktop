@@ -10,20 +10,34 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 post-0.5: magnet protocol handler, Inno Setup installer, I2P. See the [roadmap](docs/ROADMAP.en.md).
 
-## [0.5.1a] - 2026-07-05
+## [0.5.3] - 2026-07-05
 
-**btdig-style search (experimental/alpha, develop-only).** Off by default; works only behind an explicit legal-consent gate. *Not shipped to main — under experimentation on develop.*
+**btdig-style search (experimental/alpha).** Off by default; works only behind an explicit legal-consent gate.
 
 ### Added
-- **Pluggable search** — `core/search/base.py`: `SearchProvider`/`SearchResult` + registry (Qt-free). `core/search/btdig.py`: btdig HTTP query + `BeautifulSoup` (html.parser) parsing → magnets; errors wrapped in `SearchError`.
-- **Search UI** — `SearchDialog` (query, results table, legal notice banner, add selected result), a "Search" toolbar button (when enabled).
+- **Pluggable search** — `core/search/`: `SearchProvider`/`SearchResult` + registry (Qt-free), btdig provider (HTTP query + `BeautifulSoup` parsing → magnets); errors wrapped in `SearchError`.
 - **Legal-consent gate (D8)** — before search can be used, the user must acknowledge (1) legal risk, (2) possible license violation of downloaded software, (3) full personal responsibility, via a checkbox + agree. Blocked until accepted; stored in `SearchSettings.consent_accepted`.
-- **Settings** — `SearchSettings` (enabled=False default, btdig_base_url, consent_accepted=False), a Search tab in the settings dialog, config.json round-trip.
-- Adds `requests` / `beautifulsoup4`. Tests: parser (HTML fixtures), registry, consent gate, dialog (pytest-qt, mock provider — **no live network**). 181 passing.
+- **Search UI** — `SearchDialog` (query, results table, legal notice banner, add) + a Search settings tab. Off by default.
+- **Results list** — title / size / **file count** / **age (found …)** / source columns. **Click-to-sort column headers** (size=bytes, files=numeric, age=most-recent-first, unknowns last).
+- **Double-click → details** — full title, size, file count, age, info hash, **copy magnet**, **file list**, and a **"check peers via DHT"** button (real peer count via libtorrent DHT = actual liveliness).
+- **Paging ("load more")** — appends the next btdig page (`p=N`, deduped, with a count). **Defaults to most-recent order (`order=2`)** so likely-alive fresh torrents surface first.
+- Adds `requests` / `beautifulsoup4`. Tests: parser (real-markup fixtures), consent gate, paging, sorting, details, DHT probe (mocked). **No live network.**
 
 ### Notes
-- **No DHT crawler/indexer is built.** btdig is just the first provider, configured via a base URL.
-- As an experimental feature it lives on develop only; promotion to main is reviewed separately.
+- **No DHT crawler/indexer is built** — btdig is the first provider (user-configurable base URL). It's HTTP scraping, so it's fragile to site markup changes (alpha quality).
+
+## [0.5.2] - 2026-07-05
+
+**Download-start bug fix + can't-progress status display.**
+
+### Fixed
+- **Downloads not starting and "add paused" not sticking.** Every torrent was added `auto_managed=True` (for the sequential queue), so a manual `pause()` was overridden by the auto-manager within ~1 tick → (1) add-paused not sticking, (2) an unintentionally auto-resumed torrent occupying the single `active_downloads=1` slot, blocking others.
+- `pause()`: unset `auto_managed` before pausing → stays paused. `resume()`: restore `auto_managed` before resuming → rejoins the queue. `_load_resume_data()`: a manual pause is preserved across restarts.
+- 4 regression tests (stays paused, resume transition, a paused torrent doesn't block others, pause survives restart). Verified against real libtorrent 2.0.13 handle state.
+
+### Added
+- **"No seeds" / "Stalled" status.** Distinguishes torrents that are downloading but not progressing: 0 connected seeds (and swarm 0/unknown) → **"No seeds"**; 0 rate but peers/seeds present → **"Stalled"**. (User observation: a dead, seedless torrent showed only "downloading" and was confusing.) `TorrentStatus` gains `num_complete`/`num_incomplete` (swarm seeds/peers, -1=unknown); decided in `models.py`'s state label. 8 unit tests.
+- Full suite 136 passing, ruff clean.
 
 ## [0.5.0] - 2026-07-05
 
