@@ -17,6 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -26,14 +27,20 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QRadioButton,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from pytorrent_desktop.core.config import AppSettings
+from pytorrent_desktop.core.errors import SearchError
+from pytorrent_desktop.core.search.base import PAGE_SIZE, SearchProvider, SearchResult
+from pytorrent_desktop.ui.models import format_size
 
 # docs/UX-SPEC.md §2.3: real-time inline validation gates the Add button.
 # Matches the documented prefix; a v2/hybrid ("btmh") magnet is accepted too
@@ -265,6 +272,31 @@ _ON_COMPLETE_HINT = (
     "실행 전 취소할 수 있는 확인 창이 표시됩니다."
 )
 
+# -- search (v0.5.1a, EXPERIMENTAL/ALPHA) legal notice ------------------------
+#
+# Shown (a) unconditionally at the top of SearchDialog every time it opens,
+# and (b) inside SearchConsentDialog as the thing the user must explicitly
+# agree to before search is ever used (docs/SCOPE.md, docs/ARCHITECTURE.md
+# §9). Korean primary, English secondary — must state: (1) this feature can
+# be legally problematic, (2) downloaded software/content may violate its
+# license, (3) the user bears all responsibility.
+_SEARCH_LEGAL_NOTICE = (
+    "⚠ 실험적 기능(알파): 검색은 btdig 등 제3자 사이트에 질의를 보냅니다. "
+    "이 기능(토렌트 검색/다운로드)의 사용은 관할 법률에 따라 법적으로 문제가 될 수 있으며, "
+    "다운로드하는 소프트웨어/콘텐츠가 해당 라이선스를 위반할 수 있습니다. "
+    "검색 결과 확인 및 다운로드에 대한 모든 책임은 사용자 본인에게 있습니다.\n\n"
+    "Experimental (alpha) feature: search sends queries to third-party sites "
+    "such as btdig. Use of this torrent search/download feature may be "
+    "illegal depending on your jurisdiction, and the software/content you "
+    "download may violate its license. You are solely responsible for any "
+    "search results you act on and anything you download."
+)
+
+_SEARCH_CONSENT_CHECKBOX_TEXT = (
+    "위 내용을 읽고 이해했으며, 이에 대한 책임은 나에게 있음에 동의합니다."
+    " (I have read and understood the above, and I accept sole responsibility.)"
+)
+
 
 class SettingsDialog(QDialog):
     """Settings dialog: save path, listening port, SOCKS5 proxy + kill
@@ -298,6 +330,7 @@ class SettingsDialog(QDialog):
         general_group = self._build_general_group(settings)
         privacy_group = self._build_privacy_group(settings, initial_password)
         on_complete_group = self._build_on_complete_group(settings)
+        search_group = self._build_search_group(settings)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok, self
@@ -311,12 +344,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(general_group)
         layout.addWidget(privacy_group)
         layout.addWidget(on_complete_group)
+        layout.addWidget(search_group)
         layout.addStretch(1)
         layout.addWidget(self._buttons)
 
         self._update_proxy_fields_enabled(self.proxy_enabled_checkbox.isChecked())
         self._update_kill_switch_warning()
         self._update_on_complete_hint()
+        self._update_search_fields_enabled(self.search_enabled_checkbox.isChecked())
 
     # -- construction ------------------------------------------------------
 
@@ -417,6 +452,53 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.on_complete_hint_label)
         return group
 
+    def _build_search_group(self, settings: AppSettings) -> QGroupBox:
+        """검색 탭 (v0.5.1a, EXPERIMENTAL/ALPHA): enable toggle + btdig base URL.
+
+        Toggling the checkbox *on* while the legal-responsibility consent
+        (``SearchSettings.consent_accepted``) hasn't been granted yet pops the
+        consent gate (``SearchConsentDialog``) right here, inline — one of
+        the two trigger points the product spec calls for, the other being
+        ``MainWindow._ensure_search_consent`` guarding the search dialog
+        itself as a defense-in-depth backstop (e.g. against a hand-edited
+        ``config.json`` with ``enabled: true`` but no consent recorded).
+        Declining reverts the checkbox to unchecked.
+        """
+        search = settings.search
+        # Tracks whether consent has been granted *in this dialog session*
+        # (seeded from the persisted value, then possibly flipped true by
+        # the gate below) — read back by ``search_consent_accepted()``.
+        self._search_consent_accepted = search.consent_accepted
+
+        self.search_enabled_checkbox = QCheckBox("검색 사용 (실험적/알파)", self)
+        self.search_enabled_checkbox.setChecked(search.enabled)
+
+        self.search_base_url_edit = QLineEdit(search.btdig_base_url, self)
+        self.search_base_url_edit.textChanged.connect(self._clear_search_error)
+        self.search_error_label = QLabel(self)
+        self.search_error_label.setProperty("role", "error")
+        self.search_error_label.setVisible(False)
+
+        self.search_legal_label = QLabel(_SEARCH_LEGAL_NOTICE, self)
+        self.search_legal_label.setProperty("role", "warning")
+        self.search_legal_label.setWordWrap(True)
+
+        # Connected only now, after the initial setChecked() above, so
+        # pre-filling the checkbox from already-saved settings can never
+        # itself pop the consent-gate dialog during construction.
+        self.search_enabled_checkbox.toggled.connect(self._on_search_enabled_toggled)
+
+        form = QFormLayout()
+        form.addRow("btdig base URL:", self.search_base_url_edit)
+        form.addRow("", self.search_error_label)
+
+        group = QGroupBox("검색 (실험적/알파)", self)
+        layout = QVBoxLayout(group)
+        layout.addWidget(self.search_enabled_checkbox)
+        layout.addWidget(self.search_legal_label)
+        layout.addLayout(form)
+        return group
+
     # -- dynamic field state -------------------------------------------------
 
     def _update_proxy_fields_enabled(self, enabled: bool) -> None:
@@ -440,6 +522,34 @@ class SettingsDialog(QDialog):
     def _clear_proxy_error(self) -> None:
         self.proxy_error_label.setVisible(False)
 
+    def _update_search_fields_enabled(self, enabled: bool) -> None:
+        self.search_base_url_edit.setEnabled(enabled)
+
+    def _on_search_enabled_toggled(self, checked: bool) -> None:
+        self._update_search_fields_enabled(checked)
+        if checked and not self._search_consent_accepted:
+            if self._run_search_consent_gate():
+                self._search_consent_accepted = True
+            else:
+                # Declined: revert. This re-enters this handler with
+                # checked=False, which is a no-op past this branch.
+                self.search_enabled_checkbox.setChecked(False)
+                return
+        self._clear_search_error()
+
+    def _run_search_consent_gate(self) -> bool:
+        """Show the consent gate; return whether the user agreed.
+
+        Split out as its own method (rather than inlined) purely so tests
+        can monkeypatch it to skip the modal dialog while still exercising
+        the enable/revert wiring around it.
+        """
+        dialog = SearchConsentDialog(parent=self)
+        return dialog.exec() == SearchConsentDialog.DialogCode.Accepted
+
+    def _clear_search_error(self) -> None:
+        self.search_error_label.setVisible(False)
+
     def _browse_save_path(self) -> None:
         directory = QFileDialog.getExistingDirectory(
             self, "저장 경로 선택", self.save_path_edit.text()
@@ -458,11 +568,14 @@ class SettingsDialog(QDialog):
         self.save_path_error_label.setVisible(False)
         self.listen_port_error_label.setVisible(False)
         self.proxy_error_label.setVisible(False)
+        self.search_error_label.setVisible(False)
 
         ok = self._validate_save_path() and ok
         ok = self._validate_listen_port() and ok
         if self.proxy_enabled_checkbox.isChecked():
             ok = self._validate_proxy_fields() and ok
+        if self.search_enabled_checkbox.isChecked():
+            ok = self._validate_search_fields() and ok
         return ok
 
     def _validate_save_path(self) -> bool:
@@ -514,6 +627,18 @@ class SettingsDialog(QDialog):
             return False
         return True
 
+    def _validate_search_fields(self) -> bool:
+        base_url = self.search_base_url_edit.text().strip()
+        if not base_url:
+            self.search_error_label.setText("btdig base URL을 입력하세요")
+            self.search_error_label.setVisible(True)
+            return False
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            self.search_error_label.setText("http:// 또는 https://로 시작해야 합니다")
+            self.search_error_label.setVisible(True)
+            return False
+        return True
+
     # -- result accessors (read after exec() returns Accepted) ---------------
 
     def default_save_path(self) -> str:
@@ -546,6 +671,18 @@ class SettingsDialog(QDialog):
         if self.on_complete_shutdown_radio.isChecked():
             return "shutdown_system"
         return "none"
+
+    def search_enabled(self) -> bool:
+        return self.search_enabled_checkbox.isChecked()
+
+    def search_btdig_base_url(self) -> str:
+        return self.search_base_url_edit.text().strip()
+
+    def search_consent_accepted(self) -> bool:
+        """Whether the legal-responsibility gate has been accepted, either
+        previously (persisted) or just now via the inline consent gate this
+        dialog ran when the checkbox was toggled on (§ ``_on_search_enabled_toggled``)."""
+        return self._search_consent_accepted
 
 
 # -- On-complete countdown dialog (docs/DECISIONS.md D3, docs/UX-SPEC.md §5.6) -----
@@ -621,3 +758,611 @@ class OnCompleteCountdownDialog(QDialog):
     def _cancel(self) -> None:
         self._timer.stop()
         self.reject()
+
+
+# -- Search consent gate (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------------
+
+
+class SearchConsentDialog(QDialog):
+    """Legal-responsibility consent gate for the experimental search feature.
+
+    Must be explicitly accepted (checkbox checked *and* the "동의" button
+    clicked) before a search provider is ever queried or a search result is
+    ever added via ``TorrentEngine.add_magnet``. Two call sites enforce this:
+    ``SettingsDialog`` pops it the moment the user toggles "검색 사용" on
+    (if not already consented), and ``MainWindow._ensure_search_consent``
+    pops it again as a backstop right before the search dialog opens (in
+    case search got enabled without going through the Settings toggle, e.g.
+    a hand-edited ``config.json``). Declining (Cancel, or closing the
+    dialog) must leave search blocked — callers check ``exec()``'s result
+    and must not proceed on anything but ``Accepted``.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("검색 기능 사용 동의 (실험적/알파)")
+        self.setModal(True)
+
+        notice_label = QLabel(_SEARCH_LEGAL_NOTICE, self)
+        notice_label.setWordWrap(True)
+        notice_label.setProperty("role", "warning")
+
+        self.consent_checkbox = QCheckBox(_SEARCH_CONSENT_CHECKBOX_TEXT, self)
+        self.consent_checkbox.toggled.connect(self._update_agree_enabled)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok, self
+        )
+        self._agree_button = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._agree_button.setText("동의")
+        # Disabled until the checkbox is ticked — the button alone must not
+        # be enough to grant consent.
+        self._agree_button.setEnabled(False)
+        self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(notice_label)
+        layout.addWidget(self.consent_checkbox)
+        layout.addWidget(self._buttons)
+
+    def _update_agree_enabled(self, checked: bool) -> None:
+        self._agree_button.setEnabled(checked)
+
+
+# -- Search dialog (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------------------
+
+# 파일수/발견 added for the result-list UX pass (2026-07): 발견(age) is a
+# rough "is a seed still likely alive" signal — more recently found by btdig's
+# DHT crawl suggests a more likely-active swarm, though it's not a live peer
+# count (docs/SCOPE.md: btdig itself never reports one).
+_SEARCH_RESULT_COLUMNS = ("제목", "크기", "파일수", "발견", "시더", "출처")
+_COL_TITLE, _COL_SIZE, _COL_FILES, _COL_AGE, _COL_SEEDERS, _COL_SOURCE = range(6)
+
+
+def _format_optional_size(size_bytes: int | None) -> str:
+    return format_size(size_bytes) if size_bytes is not None else "-"
+
+
+def _format_optional_count(value: int | None) -> str:
+    return str(value) if value is not None else "-"
+
+
+def _format_optional_text(value: str | None) -> str:
+    return value if value else "-"
+
+
+def _files_preview_lines(files: list[str] | str | None) -> list[str]:
+    """Normalize :attr:`SearchResult.files` (list, blob string, or None) into
+    a flat list of preview lines for display."""
+    if files is None:
+        return []
+    if isinstance(files, str):
+        return [line.strip() for line in files.splitlines() if line.strip()]
+    return list(files)
+
+
+# -- column sort keys (client-side sort, added 2026-07) -----------------------
+#
+# btdig ignores any order/sort/date/size-style query parameter (live-verified
+# 2026-07) — there is no server-side sort to ask for, so SearchDialog sorts
+# whatever results are currently loaded (across however many "더 보기" pages
+# have been appended) entirely client-side, re-applying the active sort each
+# time a new page is appended.
+
+_AGE_UNIT_TO_DAYS = {
+    "minute": 1 / 1440,
+    "hour": 1 / 24,
+    "day": 1.0,
+    "week": 7.0,
+    "month": 30.0,
+    "year": 365.0,
+}
+_AGE_PATTERN = re.compile(r"(\d+)\s*(minute|hour|day|week|month|year)s?\s*ago", re.IGNORECASE)
+_AGE_RECENT_PATTERN = re.compile(r"\b(just now|today)\b", re.IGNORECASE)
+
+
+def _parse_age_to_days(age: str | None) -> float | None:
+    """Approximate btdig's ``"found N <unit> ago"`` text as a day count for
+    sorting — smaller means more recently found. Returns ``None`` for
+    missing/unrecognized text (never raises/fabricates a value), which the
+    sort-key wiring below always places last regardless of sort direction.
+
+    Units are approximated (month=30 days, year=365 days) since this is only
+    ever used to *order* rows, never displayed or used for anything exact.
+    """
+    if not age:
+        return None
+    if _AGE_RECENT_PATTERN.search(age):
+        return 0.0
+    match = _AGE_PATTERN.search(age)
+    if not match:
+        return None
+    count_text, unit = match.groups()
+    try:
+        count = int(count_text)
+    except ValueError:
+        return None
+    return count * _AGE_UNIT_TO_DAYS[unit.lower()]
+
+
+def _sort_key_title(result: SearchResult):
+    return result.title.casefold()
+
+
+def _sort_key_source(result: SearchResult):
+    return result.source.casefold()
+
+
+# One key function per sortable column. Each returns None for "unknown" so
+# _sorted_results (below) can always sink None-valued rows to the bottom,
+# regardless of ascending/descending — a plain reverse=True would instead
+# put None-valued rows first on a descending sort, which reads as "these are
+# the biggest/newest," the opposite of what "unknown" should mean.
+_SORT_KEY_FNS: dict[int, Callable[[SearchResult], object]] = {
+    _COL_TITLE: _sort_key_title,
+    _COL_SIZE: lambda result: result.size_bytes,
+    _COL_FILES: lambda result: result.num_files,
+    _COL_AGE: lambda result: _parse_age_to_days(result.age),
+    _COL_SEEDERS: lambda result: result.seeders,
+    _COL_SOURCE: _sort_key_source,
+}
+
+
+class SearchDialog(QDialog):
+    """EXPERIMENTAL/ALPHA search dialog (v0.5.1a, docs/ARCHITECTURE.md §9).
+
+    Queries the injected :class:`SearchProvider` **directly** — not through
+    :class:`~pytorrent_desktop.core.engine.TorrentEngine`, since search
+    providers are a separate, optional subsystem (docs/SCOPE.md) — and
+    catches :class:`~pytorrent_desktop.core.errors.SearchError` itself,
+    showing an inline status message instead of propagating it. Only the
+    final "다운로드 추가" step calls back out to :class:`MainWindow`, which
+    remains the sole caller of ``TorrentEngine.add_magnet`` (the same
+    division of responsibility every other dialog in this module follows).
+
+    The legal notice banner at the top is **unconditional**: it is shown
+    every time this dialog opens regardless of whether the one-time consent
+    gate (:class:`SearchConsentDialog`) has already been accepted — the
+    per-open banner and the one-time consent gate are deliberately separate
+    requirements.
+
+    Runs each query synchronously on the Qt main thread (blocking this modal
+    dialog, not the rest of the app, for the HTTP round-trip) — acceptable
+    for this experimental/alpha milestone; docs/ARCHITECTURE.md §9 sketches
+    a worker-thread version as the eventual non-alpha design. "더 보기"
+    (load-more paging, added 2026-07) shares this same trade-off: it is just
+    another synchronous ``provider.search`` call on the main thread, disabling
+    itself and showing "불러오는 중…" for the duration so the button can't be
+    double-clicked mid-request, rather than introducing a worker thread.
+
+    Paging: each provider page is nominally :data:`PAGE_SIZE` (btdig: 10)
+    results. A fresh query always fetches page 0 and resets all paging state;
+    "더 보기" fetches ``page=<next page>`` for the *same* query and appends
+    the results to the table instead of replacing it. "더 보기" is only shown
+    when the just-fetched page came back full (``== PAGE_SIZE``) — a short or
+    empty page is taken to mean there is nothing further to fetch. Results are
+    deduplicated by ``info_hash`` across pages as a defensive measure (btdig's
+    own pages don't overlap, but a provider bug or a different provider might).
+    """
+
+    def __init__(
+        self,
+        provider: SearchProvider,
+        *,
+        timeout: float = 10.0,
+        default_save_path: str = "",
+        probe_dht_peers_fn: Callable[[str, float], int | None] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"검색 (실험적/알파) — {provider.name}")
+        self.setModal(True)
+        self.resize(640, 420)
+        self._provider = provider
+        self._timeout = timeout
+        self._default_save_path = default_save_path
+        # Injected seam (mirrors MainWindow's own system_shutdown_fn pattern,
+        # docs/DECISIONS.md D3): this dialog never imports/calls TorrentEngine
+        # itself, only invokes whatever callable MainWindow wired up around
+        # TorrentEngine.probe_dht_peers. Forwarded as-is to the detail dialog.
+        self._probe_dht_peers_fn = probe_dht_peers_fn
+        # ``_results`` is the canonical arrival-order list (all pages loaded
+        # so far, used for dedup + the total-count status text).
+        # ``_displayed_results`` is whatever order is currently on screen
+        # (arrival order, or sorted — see the "sorting" note above) and is
+        # what row-index lookups (double-click, "다운로드 추가") must index
+        # into, since that's what actually lines up with the table's rows.
+        self._results: list[SearchResult] = []
+        self._displayed_results: list[SearchResult] = []
+        self._selected_magnet: str | None = None
+        self._selected_save_path: str | None = None
+        # Paging state (docs/UX note above): which query "더 보기" continues,
+        # which page it fetches next, and which info_hashes are already on
+        # the table (dedup safety net across pages).
+        self._current_query: str | None = None
+        self._next_page = 0
+        self._seen_info_hashes: set[str] = set()
+        # Sort state (client-side only — btdig ignores any sort-style query
+        # param, live-verified 2026-07): which column is currently sorted and
+        # in which direction, or None for "still in arrival order".
+        self._sort_column: int | None = None
+        self._sort_order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
+
+        banner = QLabel(_SEARCH_LEGAL_NOTICE, self)
+        banner.setWordWrap(True)
+        banner.setProperty("role", "banner-warning")
+
+        self.query_edit = QLineEdit(self)
+        self.query_edit.setPlaceholderText("검색어 입력…")
+        self.query_edit.returnPressed.connect(self._run_search)
+        search_button = QPushButton("검색", self)
+        search_button.setProperty("variant", "primary")
+        search_button.clicked.connect(self._run_search)
+        query_row = QHBoxLayout()
+        query_row.addWidget(self.query_edit)
+        query_row.addWidget(search_button)
+
+        self.status_label = QLabel(self)
+        self.status_label.setProperty("role", "hint")
+        self.status_label.setVisible(False)
+
+        self.results_table = QTableWidget(0, len(_SEARCH_RESULT_COLUMNS), self)
+        self.results_table.setHorizontalHeaderLabels(list(_SEARCH_RESULT_COLUMNS))
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.results_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.results_table.itemSelectionChanged.connect(self._update_download_enabled)
+        # 더블클릭 -> 상세보기 (제목만으로는 어떤 파일인지 구별하기 어렵다는
+        # 문제의 해결책): opens SearchResultDetailDialog for that row.
+        self.results_table.cellDoubleClicked.connect(self._open_detail_dialog)
+        # Column-header click -> client-side sort (docs/UX note above); the
+        # table itself never auto-sorts (setSortingEnabled is intentionally
+        # left False) since the None-last / parsed-age sort keys need custom
+        # logic setSortingEnabled's built-in item comparison can't express.
+        self.results_table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+
+        # "더 보기": only shown once a full (== PAGE_SIZE) page has been
+        # fetched, hidden again by every fresh search until then.
+        self._more_button = QPushButton("더 보기", self)
+        self._more_button.setVisible(False)
+        self._more_button.clicked.connect(self._load_more_results)
+        more_row = QHBoxLayout()
+        more_row.addStretch(1)
+        more_row.addWidget(self._more_button)
+        more_row.addStretch(1)
+
+        self._download_button = QPushButton("다운로드 추가", self)
+        self._download_button.setProperty("variant", "primary")
+        self._download_button.setEnabled(False)
+        self._download_button.clicked.connect(self._add_selected_to_downloads)
+
+        self._buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, self)
+        self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("닫기")
+        self._buttons.rejected.connect(self.reject)
+        self._buttons.addButton(self._download_button, QDialogButtonBox.ButtonRole.ActionRole)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(banner)
+        layout.addLayout(query_row)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.results_table)
+        layout.addLayout(more_row)
+        layout.addWidget(self._buttons)
+
+    # -- search --------------------------------------------------------------
+
+    def _run_search(self) -> None:
+        query = self.query_edit.text().strip()
+        if not query:
+            return
+        self.results_table.setRowCount(0)
+        self._results = []
+        self._displayed_results = []
+        self._seen_info_hashes = set()
+        self._current_query = query
+        self._next_page = 0
+        self._download_button.setEnabled(False)
+        self._more_button.setVisible(False)
+        # A fresh search starts back in arrival order (docs/UX note above).
+        self._sort_column = None
+        self._sort_order = Qt.SortOrder.AscendingOrder
+        self.results_table.horizontalHeader().setSortIndicatorShown(False)
+        self._set_status("검색 중…")
+        self._fetch_page(page=0)
+
+    def _load_more_results(self) -> None:
+        """"더 보기": fetch the next page for the same query and append it."""
+        if self._current_query is None:
+            return
+        self._more_button.setEnabled(False)
+        self._more_button.setText("불러오는 중…")
+        self._fetch_page(page=self._next_page)
+
+    def _fetch_page(self, *, page: int) -> None:
+        assert self._current_query is not None
+        try:
+            results = self._provider.search(self._current_query, page=page, timeout=self._timeout)
+        except SearchError as exc:
+            self._set_status(f"검색 오류: {exc}")
+            self._more_button.setVisible(False)
+            self._reset_more_button_idle()
+            return
+        self._reset_more_button_idle()
+        self._next_page = page + 1
+
+        new_results = [result for result in results if self._register_if_new(result)]
+        self._results.extend(new_results)
+        if self._sort_column is not None:
+            # A sort is active: the newly-appended rows have to be merged
+            # into it, not just tacked onto the end, so re-render from the
+            # full (now-larger) canonical list, freshly sorted.
+            self._render_table(self._sorted_results())
+        else:
+            self._displayed_results.extend(new_results)
+            self._append_rows(new_results)
+
+        if not self._results:
+            self._set_status("검색 결과가 없습니다")
+        else:
+            self._set_status(f"{len(self._results)}개 표시")
+        # A short (or empty) page means there is nothing more to fetch;
+        # only a full page justifies offering another one.
+        self._more_button.setVisible(len(results) == PAGE_SIZE)
+
+    def _register_if_new(self, result: SearchResult) -> bool:
+        """Dedup safety net across pages (keyed by info_hash when known)."""
+        if result.info_hash is None:
+            return True
+        if result.info_hash in self._seen_info_hashes:
+            return False
+        self._seen_info_hashes.add(result.info_hash)
+        return True
+
+    def _reset_more_button_idle(self) -> None:
+        self._more_button.setEnabled(True)
+        self._more_button.setText("더 보기")
+
+    def _append_rows(self, results: list[SearchResult]) -> None:
+        start_row = self.results_table.rowCount()
+        self.results_table.setRowCount(start_row + len(results))
+        for offset, result in enumerate(results):
+            row = start_row + offset
+            self.results_table.setItem(row, _COL_TITLE, QTableWidgetItem(result.title))
+            self.results_table.setItem(
+                row, _COL_SIZE, QTableWidgetItem(_format_optional_size(result.size_bytes))
+            )
+            self.results_table.setItem(
+                row, _COL_FILES, QTableWidgetItem(_format_optional_count(result.num_files))
+            )
+            self.results_table.setItem(
+                row, _COL_AGE, QTableWidgetItem(_format_optional_text(result.age))
+            )
+            self.results_table.setItem(
+                row, _COL_SEEDERS, QTableWidgetItem(_format_optional_count(result.seeders))
+            )
+            self.results_table.setItem(row, _COL_SOURCE, QTableWidgetItem(result.source))
+
+    def _render_table(self, results: list[SearchResult]) -> None:
+        """Full re-render of the table from ``results`` (used for sorting,
+        where rows aren't simply appended at the end)."""
+        self._displayed_results = list(results)
+        self.results_table.setRowCount(0)
+        self._append_rows(results)
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+        self.status_label.setVisible(bool(text))
+
+    # -- sorting ("column header click", client-side only) --------------------
+
+    def _on_header_clicked(self, column: int) -> None:
+        if column not in _SORT_KEY_FNS:
+            return
+        if self._sort_column == column:
+            self._sort_order = (
+                Qt.SortOrder.DescendingOrder
+                if self._sort_order == Qt.SortOrder.AscendingOrder
+                else Qt.SortOrder.AscendingOrder
+            )
+        else:
+            self._sort_column = column
+            self._sort_order = Qt.SortOrder.AscendingOrder
+        header = self.results_table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(column, self._sort_order)
+        self._render_table(self._sorted_results())
+
+    def _sorted_results(self) -> list[SearchResult]:
+        """``self._results`` (arrival order) sorted by the active column.
+
+        Rows whose sort key is ``None`` (unknown/unparseable) always sink to
+        the bottom, in *either* direction — a plain ``reverse=True`` would
+        instead float them to the top on a descending sort, which would read
+        as "biggest/newest," the opposite of what "unknown" means. Achieved
+        with two stable sorts: sort the known-value rows in the requested
+        direction, then append the unknown ones (in their original arrival
+        order) after them.
+        """
+        if self._sort_column is None:
+            return list(self._results)
+        key_fn = _SORT_KEY_FNS[self._sort_column]
+        known = [r for r in self._results if key_fn(r) is not None]
+        unknown = [r for r in self._results if key_fn(r) is None]
+        known.sort(key=key_fn, reverse=self._sort_order == Qt.SortOrder.DescendingOrder)
+        return known + unknown
+
+    # -- selection / download -------------------------------------------------
+
+    def _update_download_enabled(self) -> None:
+        self._download_button.setEnabled(bool(self.results_table.selectedItems()))
+
+    def _add_selected_to_downloads(self) -> None:
+        selected_rows = {index.row() for index in self.results_table.selectedIndexes()}
+        if not selected_rows:
+            return
+        row = next(iter(selected_rows))
+        if row >= len(self._displayed_results):
+            return
+        result = self._displayed_results[row]
+
+        directory = QFileDialog.getExistingDirectory(
+            self, "저장 경로 선택", self._default_save_path
+        )
+        if not directory:
+            return  # cancelled the save-path picker; stay on the results view
+
+        self._selected_magnet = result.magnet
+        self._selected_save_path = directory
+        self.accept()
+
+    # -- detail view (double-click a row) --------------------------------------
+
+    def _open_detail_dialog(self, row: int, _column: int) -> None:
+        """Double-click a result row -> full detail (title/size/files/age/
+        infohash/magnet/file-preview + optional DHT peer probe). Addresses
+        the "title alone doesn't say which file this is, or whether seeds
+        are still alive" complaint the result list itself can only hint at
+        with the 파일수/발견 columns.
+        """
+        if row >= len(self._displayed_results):
+            return
+        dialog = SearchResultDetailDialog(
+            self._displayed_results[row],
+            probe_dht_peers_fn=self._probe_dht_peers_fn,
+            probe_timeout=self._timeout,
+            parent=self,
+        )
+        dialog.exec()
+
+    # -- result accessors (read after exec() returns Accepted) ---------------
+
+    def selected_magnet(self) -> str | None:
+        return self._selected_magnet
+
+    def selected_save_path(self) -> str | None:
+        return self._selected_save_path
+
+    def results_count(self) -> int:
+        """Test helper: how many results are currently loaded."""
+        return len(self._results)
+
+
+# -- Search-result detail dialog (v0.5.1a, EXPERIMENTAL/ALPHA) ----------------
+
+
+class SearchResultDetailDialog(QDialog):
+    """Full detail view for one :class:`SearchResult`, opened by double-
+    clicking a row in :class:`SearchDialog`'s results table.
+
+    Read-only: this dialog only displays information and offers a magnet
+    copy button + an optional live DHT peer probe — it never itself adds
+    anything to downloads (that stays on :class:`SearchDialog`'s "다운로드
+    추가" flow) and, like every other dialog in this module, never calls into
+    :class:`~pytorrent_desktop.core.engine.TorrentEngine` directly. The
+    "DHT에서 피어 확인" button instead invokes ``probe_dht_peers_fn``, an
+    injected callable MainWindow wires up around
+    ``TorrentEngine.probe_dht_peers`` — the same seam pattern as
+    ``MainWindow``'s own ``system_shutdown_fn`` (docs/DECISIONS.md D3).
+    ``probe_dht_peers_fn=None`` (e.g. no engine wired up, as in most tests)
+    disables the button rather than raising.
+    """
+
+    def __init__(
+        self,
+        result: SearchResult,
+        *,
+        probe_dht_peers_fn: Callable[[str, float], int | None] | None = None,
+        probe_timeout: float = 10.0,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("검색 결과 상세")
+        self.setModal(True)
+        self.resize(520, 480)
+        self._result = result
+        self._probe_dht_peers_fn = probe_dht_peers_fn
+        self._probe_timeout = probe_timeout
+
+        title_label = QLabel(result.title, self)
+        title_label.setWordWrap(True)
+        title_label.setProperty("role", "title")
+
+        form = QFormLayout()
+        form.addRow("크기:", QLabel(_format_optional_size(result.size_bytes), self))
+        form.addRow("파일 수:", QLabel(_format_optional_count(result.num_files), self))
+        form.addRow("발견:", QLabel(_format_optional_text(result.age), self))
+        form.addRow("출처:", QLabel(result.source, self))
+
+        self.info_hash_label = QLabel(_format_optional_text(result.info_hash), self)
+        self.info_hash_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        form.addRow("Info Hash:", self.info_hash_label)
+
+        self.magnet_edit = QLineEdit(result.magnet, self)
+        self.magnet_edit.setReadOnly(True)
+        copy_magnet_button = QPushButton("복사", self)
+        copy_magnet_button.clicked.connect(self._copy_magnet)
+        magnet_row = QHBoxLayout()
+        magnet_row.addWidget(self.magnet_edit)
+        magnet_row.addWidget(copy_magnet_button)
+        form.addRow("Magnet:", magnet_row)
+
+        files_group = QGroupBox("파일 미리보기", self)
+        files_layout = QVBoxLayout(files_group)
+        self.files_list = QListWidget(files_group)
+        preview_lines = _files_preview_lines(result.files)
+        self.files_list.addItems(preview_lines)
+        files_layout.addWidget(self.files_list)
+        if not preview_lines:
+            files_layout.addWidget(QLabel("파일 미리보기 정보가 없습니다", files_group))
+
+        dht_row = QHBoxLayout()
+        self.probe_button = QPushButton("DHT에서 피어 확인", self)
+        self.probe_button.setEnabled(
+            bool(result.info_hash) and self._probe_dht_peers_fn is not None
+        )
+        self.probe_button.clicked.connect(self._probe_peers)
+        self.probe_result_label = QLabel("", self)
+        self.probe_result_label.setProperty("role", "hint")
+        dht_row.addWidget(self.probe_button)
+        dht_row.addWidget(self.probe_result_label, stretch=1)
+
+        self._buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, self)
+        self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("닫기")
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(title_label)
+        layout.addLayout(form)
+        layout.addWidget(files_group)
+        layout.addLayout(dht_row)
+        layout.addWidget(self._buttons)
+
+    # -- actions --------------------------------------------------------------
+
+    def _copy_magnet(self) -> None:
+        QGuiApplication.clipboard().setText(self._result.magnet)
+
+    def _probe_peers(self) -> None:
+        """Run the injected DHT probe seam and show its result inline.
+
+        Runs synchronously on the Qt main thread (blocking this modal dialog
+        for up to ``probe_timeout``, same trade-off documented on
+        :class:`SearchDialog`'s own synchronous search) — acceptable for this
+        experimental/alpha, explicitly user-triggered action.
+        """
+        info_hash = self._result.info_hash
+        if self._probe_dht_peers_fn is None or not info_hash:
+            self.probe_result_label.setText("확인 불가")
+            return
+        self.probe_result_label.setText("확인 중…")
+        try:
+            count = self._probe_dht_peers_fn(info_hash, self._probe_timeout)
+        except Exception:  # noqa: BLE001 - a probe failure must never crash the dialog
+            count = None
+        text = f"피어 {count}개 발견" if count is not None else "확인 불가"
+        self.probe_result_label.setText(text)

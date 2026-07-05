@@ -1,0 +1,43 @@
+<html><head><title>ubuntu torrent</title></head><body>
+<!-- Mirrors btdig's ACTUAL live markup (captured 2026-07-05): the title link
+     (.torrent_name a) points at a detail page, and the magnet lives in its own
+     <a href="magnet:..."> inside div.torrent_magnet. This is the structure the
+     original fabricated fixture got wrong, which made live search return 0.
+
+     Row 1 also mirrors the fuller live structure used for the search-result
+     UX enhancement (2026-07-05): the matched query term is wrapped in <b> in
+     both .torrent_name and .torrent_excerpt (btdig's highlighting), and
+     .torrent_files/.torrent_age/.torrent_excerpt are present as real <span>/
+     <div> siblings, not just plain text. Deliberately kept on single lines
+     with no inter-tag whitespace within .torrent_excerpt/.torrent_files —
+     that's how btdig actually serves it (minified, verified via a one-off
+     live fetch), and stray formatting whitespace there would itself get
+     parsed as extra "rows" by _parse_excerpt_lines's newline-splitting.
+     Row 2 deliberately omits all three of those to exercise the "provider
+     didn't report it -> None" path. -->
+<div class="one_result" style="display:table-row;background-color:#e8e8e8">
+  <div style="display:table-cell;color:rgb(0, 0, 0)">
+    <div style="display:table">
+      <div style="display:table-row">
+        <div class="torrent_name" style="display:table-cell"><a href="https://btdig.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ubuntu" style="color:rgb(0, 0, 204);text-decoration:underline;font-size:150%"><b style="color:red; background-color:yellow">Ubuntu</b> 24.04 Desktop amd64</a></div>
+      </div>
+    </div>
+    <div style="display:table">
+      <div style="display:table-row">
+        <div style="display:table-cell"><span class="torrent_files" style="color:#666;padding-left:10px">396</span> files <span class="torrent_size" style="color:#666;padding-left:10px">5.7 GB</span> <span class="torrent_age" style="color:rgb(0, 102, 0);padding-left:10px;margin: 0px 4px">found 2 months ago</span></div>
+      </div>
+    </div>
+    <div class="torrent_excerpt" style="display:table;padding:10px;white-space:nowrap"><div class="fa fa-folder-open" style="padding-left:0em"><b style="color:red; background-color:yellow">Ubuntu</b> 24.04 Desktop amd64</div><br/><div class="fa fa-file-archive-o" style="padding-left:1em"><b style="color:red; background-color:yellow">ubuntu</b>-24.04-desktop-amd64.iso</div><span style="color:#666;padding-left:10px">5.7 GB</span><br/><div class="fa fa-plus-circle"><a href="https://btdig.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ubuntu">2 hidden files<span style="color:#666;padding-left:10px">1.2 MB</span></a></div></div>
+    <div style="display:table;width:100%;padding:10px">
+      <div style="display:table-row">
+        <div class="torrent_magnet" style="display:table-cell"><div class="fa fa-magnet" style="color:#cc0000"><a href="magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amp;dn=ubuntu" title="Download via magnet-link">magnet:?xt=urn:btih:aaaaaaaa...</a></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="one_result">
+  <div class="torrent_name"><a href="/other">Some Other File</a></div>
+  <div class="torrent_size">700 MB</div>
+  <div class="torrent_magnet"><a href="magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"><div class="fa fa-magnet"></div></a></div>
+</div>
+</body></html>

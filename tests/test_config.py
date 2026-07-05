@@ -16,6 +16,7 @@ from pytorrent_desktop.core.config import (
     ConfigStore,
     OnCompleteSettings,
     ProxySettings,
+    SearchSettings,
     default_download_dir,
 )
 
@@ -26,6 +27,17 @@ def test_default_settings_have_no_proxy_and_on_complete_none() -> None:
     assert settings.on_complete.action == "none"
     assert settings.sequential_queue is True
     assert settings.listen_port == 6881
+
+
+# -- search settings (v0.5.1a, EXPERIMENTAL/ALPHA) ----------------------------
+
+
+def test_default_search_settings_are_disabled_with_no_consent() -> None:
+    settings = AppSettings()
+    assert settings.search.enabled is False
+    assert settings.search.consent_accepted is False
+    assert settings.search.btdig_base_url == "https://btdig.com"
+    assert settings.search.timeout == 10.0
 
 
 def test_proxy_settings_has_no_password_field() -> None:
@@ -48,12 +60,40 @@ def test_save_then_load_round_trips_all_fields(tmp_path: Path) -> None:
         proxy=ProxySettings(enabled=True, host="proxy.example", port=1080, username="alice",
                              kill_switch=False),
         on_complete=OnCompleteSettings(action="shutdown_system"),
+        search=SearchSettings(
+            enabled=True,
+            btdig_base_url="https://btdig.example",
+            timeout=15.0,
+            consent_accepted=True,
+        ),
     )
 
     store.save(original)
     loaded = store.load()
 
     assert loaded == original
+
+
+def test_search_settings_round_trip_when_disabled_and_not_consented(tmp_path: Path) -> None:
+    store = ConfigStore(AppPaths(tmp_path))
+    original = AppSettings(search=SearchSettings())
+
+    store.save(original)
+    loaded = store.load()
+
+    assert loaded.search.enabled is False
+    assert loaded.search.consent_accepted is False
+
+
+def test_load_falls_back_to_default_search_settings_when_missing(tmp_path: Path) -> None:
+    paths = AppPaths(tmp_path)
+    paths.ensure()
+    paths.config_path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+
+    store = ConfigStore(paths)
+    settings = store.load()
+
+    assert settings.search == SearchSettings()
 
 
 def test_save_never_writes_a_password_field(tmp_path: Path) -> None:

@@ -29,14 +29,18 @@ from pytorrent_desktop.core.config import (
     ConfigStore,
     OnCompleteSettings,
     ProxySettings,
+    SearchSettings,
 )
 from pytorrent_desktop.core.engine import ProxyConfig, TorrentEngine, TorrentStatus
 from pytorrent_desktop.core.errors import EngineError
+from pytorrent_desktop.core.search.base import SearchProvider
 from pytorrent_desktop.core.system_actions import request_system_shutdown
 from pytorrent_desktop.ui.dialogs import (
     AddTorrentDialog,
     OnCompleteCountdownDialog,
     RemoveDialog,
+    SearchConsentDialog,
+    SearchDialog,
     SettingsDialog,
 )
 from pytorrent_desktop.ui.models import TorrentTableModel, format_rate
@@ -45,6 +49,19 @@ _POLL_INTERVAL_MS = 1000
 _ACTIVE_STATES = {"downloading", "seeding"}
 # docs/DECISIONS.md D3: 30s, cancellable, never skipped.
 _ON_COMPLETE_COUNTDOWN_S = 30
+
+
+def _default_search_provider_factory(search_settings: SearchSettings) -> SearchProvider:
+    """Build the (only, for this alpha) built-in provider from current settings.
+
+    Imported lazily inside the function (not at module top) so that merely
+    importing ``ui.main_window`` never pulls in ``requests``/``bs4`` unless
+    the user actually opens the search dialog — mirrors ``__main__.py``'s
+    lazy-import pattern for the engine's native dependency.
+    """
+    from pytorrent_desktop.core.search.btdig import BtdigProvider
+
+    return BtdigProvider(base_url=search_settings.btdig_base_url)
 
 
 class MainWindow(QMainWindow):
@@ -57,10 +74,14 @@ class MainWindow(QMainWindow):
         config_store: ConfigStore | None = None,
         settings: AppSettings | None = None,
         system_shutdown_fn: Callable[[], None] = request_system_shutdown,
+        search_provider_factory: Callable[
+            [SearchSettings], SearchProvider
+        ] = _default_search_provider_factory,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._engine = engine
+        self._search_provider_factory = search_provider_factory
         # ``config_store`` is optional so existing (and future) tests can
         # construct a MainWindow against a bare fake engine without wiring up
         # a real config.json — settings simply aren't persisted in that case.
@@ -149,6 +170,14 @@ class MainWindow(QMainWindow):
         self._sequential_queue_action.setCheckable(True)
         self._sequential_queue_action.setChecked(self._settings.sequential_queue)
         self._sequential_queue_action.toggled.connect(self._toggle_sequential_queue)
+
+        toolbar.addSeparator()
+        # docs/ARCHITECTURE.md §9 / docs/SCOPE.md (v0.5.1a, EXPERIMENTAL/ALPHA):
+        # only enabled once the user has turned search on in Settings — see
+        # ``_update_search_action_enabled``.
+        self._search_action = toolbar.addAction("🔍 검색 (알파)")
+        self._search_action.triggered.connect(self._open_search_dialog)
+        self._update_search_action_enabled()
 
         toolbar.addSeparator()
         settings_action = toolbar.addAction("⚙ 설정")
@@ -328,10 +357,82 @@ class MainWindow(QMainWindow):
                 kill_switch=dialog.kill_switch(),
             ),
             on_complete=OnCompleteSettings(action=dialog.on_complete_action()),
+            search=SearchSettings(
+                enabled=dialog.search_enabled(),
+                btdig_base_url=dialog.search_btdig_base_url(),
+                timeout=self._settings.search.timeout,
+                consent_accepted=dialog.search_consent_accepted(),
+            ),
         )
         self._default_save_path = self._settings.default_save_path
         self._save_settings()
+        self._update_search_action_enabled()
         self._poll()
+
+    # -- search (v0.5.1a, EXPERIMENTAL/ALPHA — docs/ARCHITECTURE.md §9, docs/SCOPE.md) ---
+
+    def _update_search_action_enabled(self) -> None:
+        self._search_action.setEnabled(self._settings.search.enabled)
+
+    def _open_search_dialog(self) -> None:
+        """Open the search dialog — gated on both "enabled" and consent.
+
+        Even though the toolbar button is only enabled when
+        ``search.enabled`` is true, this re-checks both conditions
+        defensively (e.g. against a stale action or a settings change that
+        raced the button's enabled state). Consent is checked *every* time
+        this is invoked, not just once — ``_ensure_search_consent`` itself
+        short-circuits to a no-op prompt when already accepted, so this
+        never re-prompts once granted, but it also can never be bypassed by
+        skipping straight to this method.
+        """
+        if not self._settings.search.enabled:
+            return
+        if not self._settings.search.consent_accepted and not self._ensure_search_consent():
+            return
+
+        provider = self._search_provider_factory(self._settings.search)
+        dialog = SearchDialog(
+            provider,
+            timeout=self._settings.search.timeout,
+            default_save_path=self._default_save_path,
+            # Injected seam (docs/DECISIONS.md D3's pattern, same as
+            # system_shutdown_fn below): the search dialog's detail view
+            # never imports TorrentEngine itself, only calls whatever
+            # callable it's handed for the "DHT에서 피어 확인" button.
+            probe_dht_peers_fn=self._engine.probe_dht_peers,
+            parent=self,
+        )
+        if dialog.exec() != SearchDialog.DialogCode.Accepted:
+            return
+
+        magnet = dialog.selected_magnet()
+        save_path = dialog.selected_save_path()
+        if not magnet or not save_path:
+            return  # defensive: dialog only accepts with both set
+        self._default_save_path = save_path
+        try:
+            self._engine.add_magnet(magnet, save_path)
+        except EngineError as exc:
+            self._show_error("토렌트를 추가할 수 없습니다", exc)
+            return
+        self._poll()
+
+    def _ensure_search_consent(self) -> bool:
+        """Legal-responsibility consent gate (backstop copy of the one in
+        ``SettingsDialog``): blocks search — and therefore blocks any
+        ``add_magnet`` call a search result could lead to — until the user
+        explicitly agrees. Persists acceptance immediately so it isn't asked
+        again next time. Returns whether the user agreed just now.
+        """
+        dialog = SearchConsentDialog(parent=self)
+        if dialog.exec() != SearchConsentDialog.DialogCode.Accepted:
+            return False
+        self._settings = replace(
+            self._settings, search=replace(self._settings.search, consent_accepted=True)
+        )
+        self._save_settings()
+        return True
 
     # -- on-complete action (docs/DECISIONS.md D3, docs/ARCHITECTURE.md §4.4) ----
 

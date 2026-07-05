@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>btdig.com search results (fixture, one malformed row)</title></head>
+<body>
+<div id="results">
+  <div class="one_result">
+    <!-- No .torrent_name a link at all: should be skipped, not crash. -->
+    <div class="torrent_size">1 GB</div>
+  </div>
+  <div class="one_result">
+    <div class="torrent_name">
+      <!-- href is not a magnet URI: should also be skipped. -->
+      <a href="https://btdig.com/some-page">Not a magnet link</a>
+    </div>
+    <div class="torrent_size">2 GB</div>
+  </div>
+  <div class="one_result">
+    <div class="torrent_name">
+      <a href="magnet:?xt=urn:btih:2222222222222222222222222222222222222222&amp;dn=Still+Works">Still Works</a>
+    </div>
+    <div class="torrent_size">unparseable-size-text</div>
+  </div>
+</div>
+</body>
+</html>

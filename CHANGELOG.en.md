@@ -8,7 +8,23 @@ All notable changes to pytorrent-desktop are recorded here. Format follows
 
 ## [Unreleased]
 
-post-0.5: btdig-style plugin search, magnet protocol handler, Inno Setup installer, I2P. See the [roadmap](docs/ROADMAP.en.md).
+post-0.5: magnet protocol handler, Inno Setup installer, I2P. See the [roadmap](docs/ROADMAP.en.md).
+
+## [0.5.3] - 2026-07-05
+
+**btdig-style search (experimental/alpha).** Off by default; works only behind an explicit legal-consent gate.
+
+### Added
+- **Pluggable search** — `core/search/`: `SearchProvider`/`SearchResult` + registry (Qt-free), btdig provider (HTTP query + `BeautifulSoup` parsing → magnets); errors wrapped in `SearchError`.
+- **Legal-consent gate (D8)** — before search can be used, the user must acknowledge (1) legal risk, (2) possible license violation of downloaded software, (3) full personal responsibility, via a checkbox + agree. Blocked until accepted; stored in `SearchSettings.consent_accepted`.
+- **Search UI** — `SearchDialog` (query, results table, legal notice banner, add) + a Search settings tab. Off by default.
+- **Results list** — title / size / **file count** / **age (found …)** / source columns. **Click-to-sort column headers** (size=bytes, files=numeric, age=most-recent-first, unknowns last).
+- **Double-click → details** — full title, size, file count, age, info hash, **copy magnet**, **file list**, and a **"check peers via DHT"** button (real peer count via libtorrent DHT = actual liveliness).
+- **Paging ("load more")** — appends the next btdig page (`p=N`, deduped, with a count). **Defaults to most-recent order (`order=2`)** so likely-alive fresh torrents surface first.
+- Adds `requests` / `beautifulsoup4`. Tests: parser (real-markup fixtures), consent gate, paging, sorting, details, DHT probe (mocked). **No live network.**
+
+### Notes
+- **No DHT crawler/indexer is built** — btdig is the first provider (user-configurable base URL). It's HTTP scraping, so it's fragile to site markup changes (alpha quality).
 
 ## [0.5.2] - 2026-07-05
 

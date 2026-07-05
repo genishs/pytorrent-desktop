@@ -7,15 +7,34 @@ themselves (that's :class:`MainWindow`'s job).
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPushButton
+import pytest
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLabel, QPushButton
 
-from pytorrent_desktop.core.config import AppSettings, OnCompleteSettings, ProxySettings
+from pytorrent_desktop.core.config import (
+    AppSettings,
+    OnCompleteSettings,
+    ProxySettings,
+    SearchSettings,
+)
+from pytorrent_desktop.core.errors import SearchError
+from pytorrent_desktop.core.search.base import PAGE_SIZE, SearchProvider, SearchResult
 from pytorrent_desktop.ui.dialogs import (
+    _COL_AGE,
+    _COL_FILES,
+    _COL_SEEDERS,
+    _COL_SIZE,
+    _COL_SOURCE,
+    _COL_TITLE,
     AddTorrentDialog,
     OnCompleteCountdownDialog,
     RemoveDialog,
+    SearchConsentDialog,
+    SearchDialog,
+    SearchResultDetailDialog,
     SettingsDialog,
+    _parse_age_to_days,
     is_valid_magnet,
 )
 
@@ -283,3 +302,933 @@ def test_countdown_dialog_message_mentions_action_description(qtbot):
     qtbot.addWidget(dialog)
     assert "앱을 종료" in dialog._message_label.text()
     assert "30" in dialog._message_label.text()
+
+
+# -- SettingsDialog search tab (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------
+
+
+def test_settings_dialog_prefills_search_fields(qtbot, tmp_path):
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(
+            enabled=True, btdig_base_url="https://btdig.example", consent_accepted=True
+        ),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    assert dialog.search_enabled() is True
+    assert dialog.search_btdig_base_url() == "https://btdig.example"
+    assert dialog.search_consent_accepted() is True
+
+
+def test_settings_dialog_search_disabled_by_default_and_base_url_field_disabled(qtbot, tmp_path):
+    settings = AppSettings(default_save_path=str(tmp_path))
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    assert dialog.search_enabled() is False
+    assert not dialog.search_base_url_edit.isEnabled()
+
+
+def test_settings_dialog_prefill_never_triggers_consent_gate(qtbot, tmp_path, monkeypatch):
+    """Pre-filling the checkbox from already-persisted settings must never
+    itself pop the modal consent gate — only a live user toggle should."""
+    gate_calls: list = []
+    monkeypatch.setattr(
+        SettingsDialog, "_run_search_consent_gate", lambda self: gate_calls.append(1) or True
+    )
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=True, consent_accepted=False),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    assert gate_calls == []
+    assert dialog.search_consent_accepted() is False
+
+
+def test_settings_dialog_toggling_search_on_without_consent_shows_gate(
+    qtbot, tmp_path, monkeypatch
+):
+    gate_calls: list = []
+    monkeypatch.setattr(
+        SettingsDialog, "_run_search_consent_gate", lambda self: gate_calls.append(1) or True
+    )
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=False),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    dialog.search_enabled_checkbox.setChecked(True)
+
+    assert gate_calls == [1]
+    assert dialog.search_enabled() is True
+    assert dialog.search_consent_accepted() is True
+
+
+def test_settings_dialog_declining_consent_gate_reverts_checkbox(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(SettingsDialog, "_run_search_consent_gate", lambda self: False)
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=False),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    dialog.search_enabled_checkbox.setChecked(True)
+
+    assert dialog.search_enabled() is False  # reverted
+    assert dialog.search_consent_accepted() is False
+
+
+def test_settings_dialog_does_not_reprompt_once_consent_already_accepted(
+    qtbot, tmp_path, monkeypatch
+):
+    gate_calls: list = []
+    monkeypatch.setattr(
+        SettingsDialog, "_run_search_consent_gate", lambda self: gate_calls.append(1) or True
+    )
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=True),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+
+    dialog.search_enabled_checkbox.setChecked(True)
+
+    assert gate_calls == []  # already accepted -> no gate shown
+    assert dialog.search_enabled() is True
+
+
+def test_settings_dialog_save_blocked_for_empty_base_url_when_search_enabled(qtbot, tmp_path):
+    # consent already accepted so toggling search on does not pop the (modal,
+    # blocking) consent gate — this test only exercises base-URL validation.
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=True),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.search_enabled_checkbox.setChecked(True)
+    dialog.search_base_url_edit.setText("")
+
+    assert dialog._validate() is False
+    assert dialog.search_error_label.isVisible()
+
+
+def test_settings_dialog_save_blocked_for_non_http_base_url(qtbot, tmp_path):
+    settings = AppSettings(
+        default_save_path=str(tmp_path),
+        search=SearchSettings(enabled=False, consent_accepted=True),
+    )
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.search_enabled_checkbox.setChecked(True)
+    dialog.search_base_url_edit.setText("ftp://btdig.example")
+
+    assert dialog._validate() is False
+    assert dialog.search_error_label.isVisible()
+
+
+# -- SearchConsentDialog (v0.5.1a, EXPERIMENTAL/ALPHA) ------------------------
+
+
+def test_consent_dialog_agree_button_disabled_until_checkbox_checked(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    assert not dialog._agree_button.isEnabled()
+
+    dialog.consent_checkbox.setChecked(True)
+    assert dialog._agree_button.isEnabled()
+
+    dialog.consent_checkbox.setChecked(False)
+    assert not dialog._agree_button.isEnabled()
+
+
+def test_consent_dialog_accepts_only_after_checkbox_and_agree_click(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    dialog.consent_checkbox.setChecked(True)
+
+    dialog.accept()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_consent_dialog_cancel_rejects(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    dialog.reject()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+
+
+def test_consent_dialog_mentions_legal_responsibility(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    # Must state: (1) may be legally problematic, (2) may violate content
+    # license, (3) user bears all responsibility.
+    notice_text = "\n".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "법적으로 문제" in notice_text
+    assert "라이선스를 위반" in notice_text
+    assert "책임은 사용자 본인에게 있습니다" in notice_text
+
+
+def test_consent_dialog_checkbox_text_states_user_responsibility(qtbot):
+    dialog = SearchConsentDialog()
+    qtbot.addWidget(dialog)
+    assert "책임" in dialog.consent_checkbox.text()
+
+
+# -- SearchDialog (v0.5.1a, EXPERIMENTAL/ALPHA) -------------------------------
+
+
+class _StubProvider(SearchProvider):
+    """Test double supporting paging: ``results`` (or ``pages[0]``) is page 0,
+    ``pages`` maps page number -> that page's results for multi-page tests.
+    """
+
+    name = "stub"
+
+    def __init__(
+        self,
+        results=None,
+        error: Exception | None = None,
+        pages: dict[int, list[SearchResult]] | None = None,
+    ) -> None:
+        self._pages: dict[int, list[SearchResult]] = dict(pages or {})
+        if results is not None:
+            self._pages.setdefault(0, list(results))
+        self._error = error
+        self.queries: list[str] = []
+        self.pages_requested: list[int] = []
+
+    def search(self, query: str, *, page: int = 0, timeout: float = 10.0) -> list[SearchResult]:
+        self.queries.append(query)
+        self.pages_requested.append(page)
+        if self._error is not None:
+            raise self._error
+        return list(self._pages.get(page, []))
+
+
+def _make_result(**overrides) -> SearchResult:
+    defaults = dict(
+        title="example.iso",
+        size_bytes=1024,
+        seeders=5,
+        leechers=1,
+        magnet="magnet:?xt=urn:btih:" + "f" * 40,
+        source="stub",
+    )
+    defaults.update(overrides)
+    return SearchResult(**defaults)
+
+
+def test_search_dialog_shows_legal_notice_unconditionally(qtbot):
+    dialog = SearchDialog(_StubProvider())
+    qtbot.addWidget(dialog)
+    # Present regardless of whether consent has already been granted
+    # elsewhere — this banner is unconditional every time the dialog opens.
+    banner_labels = [
+        label for label in dialog.findChildren(QLabel) if label.property("role") == "banner-warning"
+    ]
+    assert len(banner_labels) == 1
+    assert "법적으로 문제" in banner_labels[0].text()
+    assert "책임" in banner_labels[0].text()
+
+
+def test_search_dialog_empty_query_does_not_call_provider(qtbot):
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("   ")
+    dialog._run_search()
+
+    assert provider.queries == []
+    assert dialog.results_table.rowCount() == 0
+
+
+def test_search_dialog_populates_results_table(qtbot):
+    provider = _StubProvider([_make_result(title="Ubuntu ISO"), _make_result(title="Debian ISO")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("linux")
+    dialog._run_search()
+
+    assert provider.queries == ["linux"]
+    assert dialog.results_table.rowCount() == 2
+    assert dialog.results_table.item(0, 0).text() == "Ubuntu ISO"
+    assert dialog.results_table.item(0, 4).text() == "5"  # seeders
+    assert dialog.results_table.item(0, 5).text() == "stub"  # source
+
+
+def test_search_dialog_shows_dash_for_unknown_optional_fields(qtbot):
+    provider = _StubProvider(
+        [_make_result(size_bytes=None, seeders=None, leechers=None, num_files=None, age=None)]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert dialog.results_table.item(0, 1).text() == "-"  # size
+    assert dialog.results_table.item(0, 2).text() == "-"  # files count
+    assert dialog.results_table.item(0, 3).text() == "-"  # age
+    assert dialog.results_table.item(0, 4).text() == "-"  # seeders
+
+
+def test_search_dialog_shows_num_files_and_age_columns(qtbot):
+    provider = _StubProvider(
+        [_make_result(num_files=42, age="found 2 months ago")]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert dialog.results_table.item(0, 2).text() == "42"
+    assert dialog.results_table.item(0, 3).text() == "found 2 months ago"
+
+
+def test_search_dialog_no_results_shows_status_message(qtbot):
+    dialog = SearchDialog(_StubProvider([]))
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.query_edit.setText("nonexistent")
+    dialog._run_search()
+
+    assert dialog.status_label.isVisible()
+    assert dialog.results_table.rowCount() == 0
+
+
+def test_search_dialog_provider_error_shown_inline_not_raised(qtbot):
+    dialog = SearchDialog(_StubProvider(error=SearchError("boom")))
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()  # must not raise
+
+    assert dialog.status_label.isVisible()
+    assert "오류" in dialog.status_label.text()
+
+
+def test_search_dialog_download_button_disabled_until_row_selected(qtbot):
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert not dialog._download_button.isEnabled()
+    dialog.results_table.selectRow(0)
+    assert dialog._download_button.isEnabled()
+
+
+def test_search_dialog_add_to_downloads_prompts_save_path_and_accepts(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    magnet = "magnet:?xt=urn:btih:" + "9" * 40
+    provider = _StubProvider([_make_result(magnet=magnet)])
+    dialog = SearchDialog(provider, default_save_path=str(tmp_path))
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog.results_table.selectRow(0)
+
+    dialog._add_selected_to_downloads()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.selected_magnet() == magnet
+    assert dialog.selected_save_path() == str(tmp_path)
+
+
+def test_search_dialog_add_to_downloads_cancelled_save_path_stays_open(qtbot, monkeypatch):
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog.results_table.selectRow(0)
+
+    dialog._add_selected_to_downloads()
+
+    assert dialog.result() != QDialog.DialogCode.Accepted
+
+
+def test_search_dialog_double_click_row_opens_detail_dialog(qtbot, monkeypatch):
+    """Double-clicking a result row must open SearchResultDetailDialog for
+    that row — the fix for "제목만 보여 어떤 파일인지 구별이 어렵다"."""
+    provider = _StubProvider([_make_result(title="Ubuntu ISO")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    opened_with: list = []
+
+    class _FakeDetailDialog:
+        def __init__(self, result, **kwargs) -> None:
+            opened_with.append(result)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(
+        "pytorrent_desktop.ui.dialogs.SearchResultDetailDialog", _FakeDetailDialog
+    )
+
+    dialog._open_detail_dialog(0, 0)
+
+    assert len(opened_with) == 1
+    assert opened_with[0].title == "Ubuntu ISO"
+
+
+def test_search_dialog_double_click_out_of_range_row_is_a_noop(qtbot):
+    provider = _StubProvider([_make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._open_detail_dialog(5, 0)  # no row 5 -> must not raise/crash
+
+
+def test_search_dialog_forwards_probe_dht_peers_fn_to_detail_dialog(qtbot, monkeypatch):
+    provider = _StubProvider([_make_result()])
+    probe_calls: list = []
+    probe_fn = lambda info_hash, timeout: probe_calls.append((info_hash, timeout)) or 7  # noqa: E731
+    dialog = SearchDialog(provider, probe_dht_peers_fn=probe_fn)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    captured: list = []
+
+    class _FakeDetailDialog:
+        def __init__(self, result, *, probe_dht_peers_fn=None, probe_timeout=10.0, parent=None):
+            captured.append(probe_dht_peers_fn)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(
+        "pytorrent_desktop.ui.dialogs.SearchResultDetailDialog", _FakeDetailDialog
+    )
+
+    dialog._open_detail_dialog(0, 0)
+
+    assert captured == [probe_fn]
+
+
+# -- SearchDialog paging ("더 보기", 2026-07) ----------------------------------
+
+
+def test_search_dialog_more_button_hidden_before_any_search(qtbot):
+    dialog = SearchDialog(_StubProvider())
+    qtbot.addWidget(dialog)
+    assert not dialog._more_button.isVisible()
+
+
+def test_search_dialog_more_button_hidden_when_first_page_is_short(qtbot):
+    provider = _StubProvider([_make_result()])  # 1 result, well under PAGE_SIZE
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert not dialog._more_button.isVisible()
+
+
+def test_search_dialog_more_button_shown_when_first_page_is_full(qtbot):
+    full_page = [_make_result(title=f"item{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(full_page)
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert dialog._more_button.isVisible()
+    assert provider.pages_requested == [0]
+
+
+def test_search_dialog_more_button_appends_next_page_without_clearing_table(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    page1 = [_make_result(title="p1-only", info_hash="9" * 40)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+
+    dialog._more_button.click()
+
+    assert provider.pages_requested == [0, 1]
+    assert provider.queries == ["q", "q"]
+    assert dialog.results_table.rowCount() == PAGE_SIZE + 1
+    assert dialog.results_table.item(0, 0).text() == "p0-0"  # earlier rows untouched
+    assert dialog.results_table.item(PAGE_SIZE, 0).text() == "p1-only"
+    assert dialog.results_count() == PAGE_SIZE + 1
+    # page1 is short (1 < PAGE_SIZE) -> no further page, button hides again.
+    assert not dialog._more_button.isVisible()
+
+
+def test_search_dialog_more_button_stays_visible_across_consecutive_full_pages(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"a{i:039d}") for i in range(PAGE_SIZE)]
+    page1 = [_make_result(title=f"p1-{i}", info_hash=f"b{i:039d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._more_button.click()
+
+    assert dialog.results_table.rowCount() == PAGE_SIZE * 2
+    assert dialog._more_button.isVisible()  # page1 was also full -> may be more
+
+
+def test_search_dialog_more_button_dedupes_by_info_hash(qtbot):
+    """Defensive dedup: even if a page re-returns an info_hash already shown
+    (btdig's own pages don't overlap, but this guards against a provider bug),
+    the duplicate must not be appended twice."""
+    shared_hash = "d" * 40
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"c{i:039d}") for i in range(PAGE_SIZE - 1)]
+    page0.append(_make_result(title="dup", info_hash=shared_hash))
+    page1 = [_make_result(title="dup-again", info_hash=shared_hash)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+
+    dialog._more_button.click()
+
+    # page1's only result was a duplicate -> nothing appended, but the fetch
+    # still happened (this isn't the "page was short" case, it's dedup).
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+    assert dialog.results_count() == PAGE_SIZE
+
+
+def test_search_dialog_more_button_failure_shows_inline_error_and_hides_button(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(pages={0: page0})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog._more_button.isVisible()
+
+    provider._error = SearchError("network down")
+    dialog._more_button.click()  # must not raise
+
+    assert not dialog._more_button.isVisible()
+    assert "오류" in dialog.status_label.text()
+    # rows already shown before the failed "더 보기" fetch stay put.
+    assert dialog.results_table.rowCount() == PAGE_SIZE
+
+
+def test_search_dialog_new_search_resets_paging_state(qtbot):
+    page0 = [_make_result(title=f"p0-{i}", info_hash=f"{i:040d}") for i in range(PAGE_SIZE)]
+    provider = _StubProvider(pages={0: page0})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    assert dialog._more_button.isVisible()
+
+    provider._pages = {0: [_make_result(title="fresh", info_hash="e" * 40)]}
+    dialog.query_edit.setText("new query")
+    dialog._run_search()
+
+    assert provider.pages_requested[-1] == 0  # started over at page 0
+    assert dialog.results_table.rowCount() == 1
+    assert dialog.results_table.item(0, 0).text() == "fresh"
+    assert not dialog._more_button.isVisible()  # short page -> hidden again
+
+
+def test_search_dialog_status_label_shows_result_count(qtbot):
+    provider = _StubProvider([_make_result(), _make_result()])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    assert "2" in dialog.status_label.text()
+
+
+# -- age-to-days sort-key parsing ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("age_text", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("something unparseable", None),
+        ("found just now", 0.0),
+        ("found today", 0.0),
+        ("found 30 minutes ago", 30 / 1440),
+        ("found 5 hours ago", 5 / 24),
+        ("found 2 months ago", 60.0),
+        ("found 11 months ago", 330.0),
+        ("found 4 years ago", 1460.0),
+        ("found 1 day ago", 1.0),
+        ("found 3 weeks ago", 21.0),
+    ],
+)
+def test_parse_age_to_days(age_text, expected):
+    actual = _parse_age_to_days(age_text)
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual == pytest.approx(expected)
+
+
+def test_parse_age_to_days_orders_recent_before_old_before_unknown():
+    values = [
+        _parse_age_to_days("found 2 months ago"),
+        _parse_age_to_days("found 11 months ago"),
+        _parse_age_to_days("found 4 years ago"),
+    ]
+    assert values == sorted(values)  # strictly increasing == already in order
+    assert _parse_age_to_days("garbage") is None  # unknown sorts after all of the above
+
+
+# -- SearchDialog client-side column sort (2026-07) ----------------------------
+
+
+def test_search_dialog_sort_by_size_is_numeric_not_lexicographic(qtbot):
+    """Lexicographic sort would put "1000 B" before "128 B" (wrong); the
+    numeric size_bytes key must sort them the other way around."""
+    provider = _StubProvider(
+        [_make_result(title="big", size_bytes=1000), _make_result(title="small", size_bytes=128)]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SIZE)  # ascending
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "small"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "big"
+
+
+def test_search_dialog_sort_by_num_files_is_numeric(qtbot):
+    provider = _StubProvider(
+        [_make_result(title="many", num_files=120), _make_result(title="few", num_files=3)]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_FILES)
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "few"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "many"
+
+
+def test_search_dialog_sort_by_age_puts_most_recent_first(qtbot):
+    provider = _StubProvider(
+        [
+            _make_result(title="oldest", age="found 4 years ago"),
+            _make_result(title="newest", age="found 2 months ago"),
+            _make_result(title="middle", age="found 11 months ago"),
+        ]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_AGE)
+
+    titles = [dialog.results_table.item(row, _COL_TITLE).text() for row in range(3)]
+    assert titles == ["newest", "middle", "oldest"]
+
+
+def test_search_dialog_sort_none_values_always_last_ascending_and_descending(qtbot):
+    provider = _StubProvider(
+        [
+            _make_result(title="unknown", size_bytes=None),
+            _make_result(title="huge", size_bytes=999),
+            _make_result(title="tiny", size_bytes=1),
+        ]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SIZE)  # ascending: tiny, huge, unknown
+    assert [dialog.results_table.item(r, _COL_TITLE).text() for r in range(3)] == [
+        "tiny",
+        "huge",
+        "unknown",
+    ]
+
+    dialog._on_header_clicked(_COL_SIZE)  # click again -> descending: huge, tiny, unknown
+    assert [dialog.results_table.item(r, _COL_TITLE).text() for r in range(3)] == [
+        "huge",
+        "tiny",
+        "unknown",
+    ]
+
+
+def test_search_dialog_sort_by_title_is_case_insensitive(qtbot):
+    provider = _StubProvider([_make_result(title="banana"), _make_result(title="Apple")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_TITLE)
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "Apple"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "banana"
+
+
+def test_search_dialog_sort_by_source(qtbot):
+    provider = _StubProvider(
+        [_make_result(title="b", source="zeta"), _make_result(title="a", source="alpha")]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SOURCE)
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "a"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "b"
+
+
+def test_search_dialog_sort_by_seeders_is_numeric_with_none_last(qtbot):
+    """Not explicitly a btdig field (always None for btdig, docs/SCOPE.md),
+    but the column exists in the table and other providers may report it —
+    sorting it numerically with None-last follows the same rule as size/files."""
+    provider = _StubProvider(
+        [
+            _make_result(title="unknown", seeders=None),
+            _make_result(title="popular", seeders=50),
+            _make_result(title="rare", seeders=1),
+        ]
+    )
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    dialog._on_header_clicked(_COL_SEEDERS)
+
+    assert [dialog.results_table.item(r, _COL_TITLE).text() for r in range(3)] == [
+        "rare",
+        "popular",
+        "unknown",
+    ]
+
+
+def test_search_dialog_active_sort_is_reapplied_after_more_results_appended(qtbot):
+    """"더 보기" must not simply tack the new page onto the end while a sort
+    is active — the newly-arrived rows have to be merged into the existing
+    sort order."""
+    page0 = [_make_result(title="p0-mid", size_bytes=50, info_hash="1" * 40)]
+    page0 += [
+        _make_result(title=f"p0-{i}", size_bytes=100 + i, info_hash=f"{i:040d}")
+        for i in range(PAGE_SIZE - 1)
+    ]
+    page1 = [_make_result(title="p1-smallest", size_bytes=1, info_hash="9" * 40)]
+    provider = _StubProvider(pages={0: page0, 1: page1})
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog._on_header_clicked(_COL_SIZE)  # ascending by size
+
+    dialog._more_button.click()
+
+    # After re-sorting the merged (page0 + page1) set ascending by size, the
+    # smallest overall (page1's late-arriving row) must be first, not last.
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "p1-smallest"
+
+
+def test_search_dialog_new_search_resets_sort_state(qtbot):
+    provider = _StubProvider([_make_result(title="banana"), _make_result(title="Apple")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+    dialog._on_header_clicked(_COL_TITLE)
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "Apple"
+
+    provider._pages = {0: [_make_result(title="zzz"), _make_result(title="aaa")]}
+    dialog.query_edit.setText("new query")
+    dialog._run_search()
+
+    # Fresh search -> arrival order restored (no leftover sort applied).
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "zzz"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "aaa"
+    assert dialog._sort_column is None
+
+
+def test_search_dialog_header_click_sorts_via_real_mouse_click(qtbot):
+    """One end-to-end check that clicking the actual header section (not
+    just calling the handler directly) triggers the sort."""
+    provider = _StubProvider([_make_result(title="banana"), _make_result(title="Apple")])
+    dialog = SearchDialog(provider)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.query_edit.setText("q")
+    dialog._run_search()
+
+    header = dialog.results_table.horizontalHeader()
+    x = header.sectionViewportPosition(_COL_TITLE) + 5
+    qtbot.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(x, 5))
+
+    assert dialog.results_table.item(0, _COL_TITLE).text() == "Apple"
+    assert dialog.results_table.item(1, _COL_TITLE).text() == "banana"
+    assert dialog.results_table.horizontalHeader().isSortIndicatorShown()
+
+
+# -- SearchResultDetailDialog (v0.5.1a, EXPERIMENTAL/ALPHA) -------------------
+
+
+def test_detail_dialog_shows_full_title_and_fields(qtbot):
+    result = _make_result(
+        title="Ubuntu 24.04 Desktop amd64",
+        size_bytes=int(5.7 * 1024**3),
+        num_files=396,
+        age="found 2 months ago",
+        info_hash="a" * 40,
+    )
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert any(
+        label.text() == "Ubuntu 24.04 Desktop amd64" for label in dialog.findChildren(QLabel)
+    )
+    assert dialog.info_hash_label.text() == "a" * 40
+    assert dialog.magnet_edit.text() == result.magnet
+
+
+def test_detail_dialog_shows_dash_for_missing_optional_fields(qtbot):
+    result = _make_result(num_files=None, age=None, info_hash=None)
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert dialog.info_hash_label.text() == "-"
+
+
+def test_detail_dialog_files_preview_populates_list(qtbot):
+    result = _make_result(files=["a.iso", "b.txt"])
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert dialog.files_list.count() == 2
+    assert dialog.files_list.item(0).text() == "a.iso"
+
+
+def test_detail_dialog_files_preview_accepts_blob_string(qtbot):
+    result = _make_result(files="a.iso\nb.txt\n")
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    assert dialog.files_list.count() == 2
+
+
+def test_detail_dialog_copy_magnet_button_copies_to_clipboard(qtbot):
+    magnet = "magnet:?xt=urn:btih:" + "c" * 40
+    result = _make_result(magnet=magnet)
+    dialog = SearchResultDetailDialog(result)
+    qtbot.addWidget(dialog)
+
+    copy_button = next(b for b in dialog.findChildren(QPushButton) if b.text() == "복사")
+    copy_button.click()
+
+    assert QGuiApplication.clipboard().text() == magnet
+
+
+def test_detail_dialog_probe_button_disabled_without_info_hash(qtbot):
+    result = _make_result(info_hash=None)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=lambda h, t: 5)
+    qtbot.addWidget(dialog)
+
+    assert not dialog.probe_button.isEnabled()
+
+
+def test_detail_dialog_probe_button_disabled_without_probe_fn(qtbot):
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=None)
+    qtbot.addWidget(dialog)
+
+    assert not dialog.probe_button.isEnabled()
+
+
+def test_detail_dialog_probe_button_shows_peer_count(qtbot):
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=lambda h, t: 12)
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()
+
+    assert "12" in dialog.probe_result_label.text()
+
+
+def test_detail_dialog_probe_button_shows_unavailable_when_probe_returns_none(qtbot):
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=lambda h, t: None)
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()
+
+    assert "확인 불가" in dialog.probe_result_label.text()
+
+
+def test_detail_dialog_probe_button_passes_info_hash_and_timeout(qtbot):
+    calls: list = []
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(
+        result, probe_dht_peers_fn=lambda h, t: calls.append((h, t)), probe_timeout=7.5
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()
+
+    assert calls == [("a" * 40, 7.5)]
+
+
+def test_detail_dialog_probe_button_survives_a_raising_probe_fn(qtbot):
+    """A probe failure must show '확인 불가', never crash the dialog."""
+
+    def _boom(info_hash, timeout):
+        raise RuntimeError("dht unreachable")
+
+    result = _make_result(info_hash="a" * 40)
+    dialog = SearchResultDetailDialog(result, probe_dht_peers_fn=_boom)
+    qtbot.addWidget(dialog)
+
+    dialog.probe_button.click()  # must not raise
+
+    assert "확인 불가" in dialog.probe_result_label.text()

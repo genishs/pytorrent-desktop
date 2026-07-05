@@ -125,6 +125,33 @@ class OnCompleteSettings:
     action: OnCompleteAction = "none"
 
 
+_DEFAULT_BTDIG_BASE_URL = "https://btdig.com"
+
+
+@dataclass(frozen=True)
+class SearchSettings:
+    """EXPERIMENTAL/ALPHA (v0.5.1a) — pluggable search providers.
+
+    docs/ARCHITECTURE.md §9 / docs/SCOPE.md: search is a post-MVP,
+    off-by-default, user-activated feature. The first (and only, for this
+    alpha) provider is btdig-style: HTTP query + HTML parsing only, no DHT
+    crawler (see ``core/search/btdig.py``).
+
+    ``consent_accepted`` backs the legal-responsibility consent gate the UI
+    enforces before any provider is ever queried or any result added via
+    ``TorrentEngine.add_magnet`` (``ui/dialogs.py``'s ``SearchConsentDialog``,
+    ``ui/main_window.py``'s ``_ensure_search_consent``). It is persisted so
+    the user is not re-prompted every session once accepted, but it must
+    only ever be flipped to ``True`` by that explicit checkbox+button flow —
+    never implicitly by loading/round-tripping a config file.
+    """
+
+    enabled: bool = False
+    btdig_base_url: str = _DEFAULT_BTDIG_BASE_URL
+    timeout: float = 10.0
+    consent_accepted: bool = False
+
+
 @dataclass(frozen=True)
 class AppSettings:
     """The full ``config.json`` schema (docs/ARCHITECTURE.md §7), as a value object.
@@ -139,6 +166,7 @@ class AppSettings:
     sequential_queue: bool = True
     proxy: ProxySettings = field(default_factory=ProxySettings)
     on_complete: OnCompleteSettings = field(default_factory=OnCompleteSettings)
+    search: SearchSettings = field(default_factory=SearchSettings)
 
 
 class ConfigStore:
@@ -198,6 +226,12 @@ class ConfigStore:
                 "kill_switch": settings.proxy.kill_switch,
             },
             "on_complete": {"action": settings.on_complete.action},
+            "search": {
+                "enabled": settings.search.enabled,
+                "btdig_base_url": settings.search.btdig_base_url,
+                "timeout": settings.search.timeout,
+                "consent_accepted": settings.search.consent_accepted,
+            },
         }
 
     @staticmethod
@@ -205,6 +239,7 @@ class ConfigStore:
         defaults = AppSettings()
         proxy_raw = raw.get("proxy") or {}
         on_complete_raw = raw.get("on_complete") or {}
+        search_raw = raw.get("search") or {}
 
         action = on_complete_raw.get("action", defaults.on_complete.action)
         if action not in _ON_COMPLETE_ACTIONS:
@@ -223,4 +258,14 @@ class ConfigStore:
                 kill_switch=bool(proxy_raw.get("kill_switch", defaults.proxy.kill_switch)),
             ),
             on_complete=OnCompleteSettings(action=action),
+            search=SearchSettings(
+                enabled=bool(search_raw.get("enabled", defaults.search.enabled)),
+                btdig_base_url=str(
+                    search_raw.get("btdig_base_url", defaults.search.btdig_base_url)
+                ),
+                timeout=float(search_raw.get("timeout", defaults.search.timeout)),
+                consent_accepted=bool(
+                    search_raw.get("consent_accepted", defaults.search.consent_accepted)
+                ),
+            ),
         )
